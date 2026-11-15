@@ -44,13 +44,14 @@ The gap (5% of face) is the margin. A $50 card costs us $40, sells for $42.50.
 | `server/app.js` | The API (Express) |
 | `server/store.js` | Storage: JSON file locally, Netlify Blobs in production |
 | `server/dev.js` | Local API entry (port 5181) |
-| `netlify/functions/api.mjs` | Netlify entry: the same app via `serverless-http` |
+| `netlify/functions/api.mjs` | Netlify entry (Functions v2): the same app via `serverless-http` |
 | `src/` | React app: `marketing/`, `app/` (customer), `admin/` |
 
 ## Deploying (Netlify)
 
-`netlify.toml` builds the site to `dist/`, sends `/api/*` to the function,
-and falls back to `index.html` for client routes.
+`netlify.toml` builds the site to `dist/` and falls back to `index.html` for
+client routes. The API is a Functions v2 function mounted on `/api/*` (its
+`config.path`); v2 is needed for strongly consistent Blobs reads.
 
 ```bash
 netlify deploy --build --prod

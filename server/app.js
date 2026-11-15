@@ -1,7 +1,7 @@
 // Food Token demo API.
 // A small Express app shared by the customer app and the admin. Storage is
 // pluggable: a JSON file locally (server/dev.js), Netlify Blobs when deployed
-// (netlify/functions/api.mjs). Everything here is demo-grade: no auth, fake
+// (netlify/functions/api.mjs, Functions v2). Everything here is demo-grade: no auth, fake
 // wallet addresses, simulated deposits. Money is stored in integer cents.
 import express from 'express'
 import { randomUUID, randomBytes } from 'node:crypto'
@@ -125,7 +125,7 @@ function meView(user) {
 // ---------- app ----------
 const app = express()
 
-// Netlify routes /api/* to /.netlify/functions/api/*; put the prefix back.
+// If a request arrives under the function's internal URL, put /api back.
 app.use((req, _res, next) => {
   if (req.url.startsWith('/.netlify/functions/api')) req.url = '/api' + req.url.slice('/.netlify/functions/api'.length)
   next()
@@ -479,6 +479,13 @@ app.post('/api/admin/reset', (_req, res) => {
   db = seed()
   save()
   res.json({ ok: true })
+})
+
+// Never send stack traces to the browser.
+app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }))
+app.use((err, _req, res, _next) => {
+  console.error(err)
+  res.status(err.status && err.status < 500 ? err.status : 500).json({ error: err.status === 400 ? 'Bad request.' : 'Something went wrong. Please try again.' })
 })
 
 export function createApp(options) {
