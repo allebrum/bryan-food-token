@@ -39,6 +39,14 @@ export default function AppRoot() {
   // On the magic-link page, Verify sets the user; a parallel /me (still
   // signed out) could otherwise land last and sign them back out.
   const verifying = pathname === '/app/verify'
+  // Home-screen shortcut "Add crypto" opens /app?add=1.
+  const [wantsDeposit] = useState(() => new URLSearchParams(window.location.search).get('add') === '1')
+  useEffect(() => {
+    if (wantsDeposit && me) {
+      setFlow({ kind: 'deposit' })
+      window.history.replaceState(null, '', '/app')
+    }
+  }, [wantsDeposit, me])
   useEffect(() => {
     if (verifying) setLoading(false)
     else refresh()

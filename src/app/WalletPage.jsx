@@ -5,6 +5,7 @@ import Button from '../components/Button'
 import GiftCardPass from '../components/GiftCardPass'
 import Stack from '../components/Stack'
 import { LogoMark } from '../components/Logo'
+import { AppPrompts } from '../components/AppPrompts'
 import { money, ago } from '../lib/format'
 import { useAccount } from './AppRoot'
 
@@ -66,6 +67,8 @@ export default function WalletPage() {
           <Stat label="On your gift cards" value={money(cardTotal)} />
           <Stat label="You’ve saved" value={money(me.saved)} tone="save" />
         </div>
+
+        <AppPrompts />
 
         {/* Cards */}
         <section className="mt-12" aria-labelledby="cards-h">

@@ -38,6 +38,11 @@ export const config = {
     // (sweeping them would cost more in fees than they're worth).
     minUsd: { ethereum: num(env.MIN_DEPOSIT_USD_ETHEREUM, 20), base: num(env.MIN_DEPOSIT_USD_BASE, 2), bsc: num(env.MIN_DEPOSIT_USD_BSC, 2) },
   },
+  // Web Push (npx web-push generate-vapid-keys). Push is off until both are set.
+  push: {
+    publicKey: env.VAPID_PUBLIC_KEY || '',
+    privateKey: env.VAPID_PRIVATE_KEY || '',
+  },
   // Company wallets (gas top-ups, sweeps). Transfers FROM these are never
   // credited to a customer.
   treasuryAddresses: new Set(

@@ -8,4 +8,9 @@ export default defineConfig({
     port: 5180,
     proxy: { '/api': 'http://localhost:5181' },
   },
+  // `npx vite preview` serves the production build (with the service worker).
+  preview: {
+    port: 5183,
+    proxy: { '/api': 'http://localhost:5181' },
+  },
 })

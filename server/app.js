@@ -11,6 +11,7 @@ import { sendMagicLink, sendDepositHelpRequest } from './email.js'
 import { seedBrands, demoInventory, makeCardNumber, makePin } from './seed.js'
 import { allocateEvmAddress, confirmDeposits, ingestAlchemy, verifyAlchemySignature } from './deposits.js'
 import { EVM_NETWORKS, enabledEvmNetworks, evmEnabled } from './chains/evm.js'
+import { notifyUser, notifyAdmins, messages, pushEnabled } from './push.js'
 
 const app = express()
 app.disable('x-powered-by')
@@ -144,7 +145,53 @@ async function requireAdmin(req) {
 }
 
 // ---------- public config ----------
-app.get('/api/config', (_req, res) => res.json({ demoMode: config.demoMode }))
+app.get('/api/config', (_req, res) => res.json({ demoMode: config.demoMode, pushPublicKey: pushEnabled() ? config.push.publicKey : null }))
+
+// ---------- push notifications ----------
+// Subscriptions are URLs our server will POST to, so only real browser push
+// services are accepted (no server-side request forgery via a fake endpoint).
+const PUSH_HOSTS = ['fcm.googleapis.com', 'push.services.mozilla.com', 'push.apple.com', 'notify.windows.com']
+function validPushEndpoint(raw) {
+  try {
+    const u = new URL(raw)
+    return u.protocol === 'https:' && !u.port && PUSH_HOSTS.some((h) => u.hostname === h || u.hostname.endsWith('.' + h))
+  } catch {
+    return false
+  }
+}
+
+app.post('/api/push/subscribe', async (req, res) => {
+  const user = await requireUser(req)
+  if (!pushEnabled()) fail(503, 'Notifications aren’t set up yet.')
+  const sub = req.body?.subscription
+  const endpoint = str(sub?.endpoint, 1000)
+  const p256dh = str(sub?.keys?.p256dh, 200)
+  const auth = str(sub?.keys?.auth, 100)
+  if (!validPushEndpoint(endpoint) || !p256dh || !auth) fail(400, 'That notification subscription isn’t valid.')
+  // Keep at most 10 devices per account: drop the oldest.
+  const { n } = await one('SELECT count(*)::int AS n FROM push_subscriptions WHERE user_id = $1', [user.id])
+  if (n >= 10) await q('DELETE FROM push_subscriptions WHERE id IN (SELECT id FROM push_subscriptions WHERE user_id = $1 ORDER BY created_at LIMIT 1)', [user.id])
+  // A device that signs into another account moves to that account.
+  await q(
+    `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent) VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (endpoint) DO UPDATE SET user_id = EXCLUDED.user_id, p256dh = EXCLUDED.p256dh, auth = EXCLUDED.auth, user_agent = EXCLUDED.user_agent`,
+    [user.id, endpoint, p256dh, auth, str(req.get('user-agent'), 300)],
+  )
+  res.json({ ok: true })
+})
+
+app.post('/api/push/unsubscribe', async (req, res) => {
+  const user = await requireUser(req)
+  await q('DELETE FROM push_subscriptions WHERE user_id = $1 AND endpoint = $2', [user.id, str(req.body?.endpoint, 1000)])
+  res.json({ ok: true })
+})
+
+app.post('/api/push/test', async (req, res) => {
+  const user = await requireUser(req)
+  const sent = await notifyUser(user.id, { title: 'Notifications are on', body: 'We’ll let you know when your crypto arrives.', url: '/app', tag: 'test' })
+  if (!sent) fail(409, 'No device to notify yet. Turn notifications on first.')
+  res.json({ ok: true, sent })
+})
 
 // ---------- chain webhooks ----------
 // Alchemy Address Activity. Unsigned or mis-signed calls are rejected; a
@@ -446,6 +493,7 @@ app.post('/api/deposits/:id/help', async (req, res) => {
     await q(`UPDATE deposits SET support_requested_at = NULL, support_message = NULL WHERE id = $1`, [id])
     throw err
   }
+  await notifyAdmins(messages.adminHelp({ id, email: user.email, coin: d.coin }))
   res.json({ ok: true })
 })
 
@@ -793,9 +841,10 @@ app.post('/api/admin/deposits/:id/credit', async (req, res) => {
     await c.query(`INSERT INTO ledger (user_id, amount_cents, kind, ref) VALUES ($1, $2, 'deposit', $3)`, [d.user_id, d.usd_cents, d.id])
     await c.query(`UPDATE users SET balance_cents = balance_cents + $2 WHERE id = $1`, [d.user_id, d.usd_cents])
     await audit(c, req.admin.email, 'deposit.credit_held', { id: d.id, usdCents: Number(d.usd_cents) })
-    return Number(d.usd_cents)
+    return { cents: Number(d.usd_cents), userId: d.user_id }
   })
-  res.json({ ok: true, credited })
+  await notifyUser(credited.userId, messages.depositApproved({ id, usdCents: credited.cents }))
+  res.json({ ok: true, credited: credited.cents })
 })
 
 app.get('/api/admin/customers', async (_req, res) => {

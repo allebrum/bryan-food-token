@@ -12,6 +12,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 import { config } from './config.js'
 import { q, one } from './db.js'
 import { EVM_NETWORKS, enabledEvmNetworks, evmEnabled, deriveEvmAddress, rpc, formatUnits } from './chains/evm.js'
+import { notifyUser, notifyAdmins, messages } from './push.js'
 
 const STABLE = new Set(['USDC', 'USDT'])
 
@@ -73,6 +74,7 @@ export async function ingestAlchemy(network, payload) {
   const to = [...new Set(activity.map((a) => String(a.toAddress || '').toLowerCase()).filter(Boolean))]
   const owners = new Map((await q(`SELECT address, user_id FROM deposit_addresses WHERE family = 'evm' AND address = ANY($1)`, [to])).rows.map((r) => [r.address, r.user_id]))
   let recorded = 0
+  const seen = []
   for (const a of activity) {
     const toAddr = String(a.toAddress || '').toLowerCase()
     const userId = owners.get(toAddr)
@@ -119,11 +121,14 @@ export async function ingestAlchemy(network, payload) {
     if (raw <= 0n) continue
     const r = await q(
       `INSERT INTO deposits (user_id, coin, network, amount, tx_ref, status, address, from_address, asset, block_number, block_hash, required_confirmations)
-       VALUES ($1, $2, $3, $4, $5, 'confirming', $6, $7, $8, $9, $10, $11) ON CONFLICT (network, tx_ref) DO NOTHING`,
+       VALUES ($1, $2, $3, $4, $5, 'confirming', $6, $7, $8, $9, $10, $11) ON CONFLICT (network, tx_ref) DO NOTHING RETURNING id`,
       [userId, coin, network, formatUnits(raw, decimals), txRef, toAddr, from, asset, blockNumber, a.log?.blockHash || null, net.confirmations],
     )
     recorded += r.rowCount
+    if (r.rowCount) seen.push({ userId, id: r.rows[0].id, amount: formatUnits(raw, decimals), coin, network: net.label })
   }
+  // Only for newly recorded deposits, so webhook retries don't re-notify.
+  await Promise.allSettled(seen.map((d) => notifyUser(d.userId, messages.depositSeen(d))))
   return { recorded }
 }
 
@@ -186,10 +191,15 @@ export async function confirmDeposits({ userId } = {}) {
       const usdCents = Math.floor(Number(d.amount) * rate * 100)
       const min = config.evm.minUsd[d.network] ?? 0
       if (usdCents < min * 100) {
-        await q(
+        const held = await q(
           `UPDATE deposits SET status = 'held', rate_usd = $2, usd_cents = $3, confirmations = $4, note = $5 WHERE id = $1 AND status = 'confirming'`,
           [d.id, rate, usdCents, confirmations, `below $${min} minimum`],
         )
+        if (held.rowCount) {
+          const info = { id: d.id, amount: Number(d.amount), coin: d.coin, network: EVM_NETWORKS[d.network].label, usdCents }
+          const owner = await one('SELECT email FROM users WHERE id = $1', [d.user_id])
+          await Promise.allSettled([notifyUser(d.user_id, messages.depositHeld(info)), notifyAdmins(messages.adminHeld({ ...info, email: owner?.email }))])
+        }
         continue
       }
       // Atomic: complete the deposit, write its ledger row, credit the user.
@@ -206,6 +216,7 @@ export async function confirmDeposits({ userId } = {}) {
         [d.id, rate, usdCents, confirmations, receipt.blockHash],
       )
       credited += r.rowCount
+      if (r.rowCount) await notifyUser(d.user_id, messages.depositCredited({ id: d.id, amount: Number(d.amount), coin: d.coin, usdCents }))
     } catch (err) {
       console.error(`confirm deposit ${d.id} failed (will retry)`, err.message)
     }

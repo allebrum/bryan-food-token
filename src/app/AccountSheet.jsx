@@ -4,6 +4,7 @@ import Modal from '../components/Modal'
 import Button from '../components/Button'
 import { initials } from '../lib/format'
 import { CoinBadge } from './DepositFlow'
+import { NotificationSettings } from '../components/AppPrompts'
 import { useAccount } from './AppRoot'
 
 export default function AccountSheet({ open, onClose }) {
@@ -32,6 +33,10 @@ export default function AccountSheet({ open, onClose }) {
           </li>
         ))}
       </ul>
+
+      <div className="mt-8">
+        <NotificationSettings />
+      </div>
 
       <div className="mt-8 grid gap-2">
         {me.isAdmin && (

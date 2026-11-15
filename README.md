@@ -39,6 +39,7 @@ Without `RESEND_API_KEY`, sign-in links are printed in the API console.
 | `ALCHEMY_<NET>_WEBHOOK_ID`, `ALCHEMY_<NET>_SIGNING_KEY` | per network | `<NET>` = `ETHEREUM`, `BASE`, `BSC`. A network goes live when both are set. |
 | `MIN_DEPOSIT_USD_<NET>` | no | Defaults: Ethereum 20, Base 2, BSC 2. Smaller deposits are held. |
 | `TREASURY_ADDRESSES` | no | Company wallets; transfers from them are never credited. |
+| `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY` | for push | From `npx web-push generate-vapid-keys`. Push stays off until both are set. |
 
 ## How it's built
 
@@ -77,6 +78,20 @@ Without `RESEND_API_KEY`, sign-in links are printed in the API console.
   this; users watching a deposit trigger it sooner.
 - **Accepted**: USDC (Ethereum, Base, BSC), USDT (Ethereum, BSC), ETH
   (Ethereum, Base), BNB (BSC).
+
+## Installable app and notifications
+
+- **PWA**: `public/manifest.webmanifest`, icons in `public/icons` (regenerate
+  with `node scripts/icons.js`), and `public/sw.js`. Pages are network-first
+  with an offline fallback, built assets cache-first, `/api` never cached.
+  The service worker only registers in production builds; test locally with
+  `npx vite build && npx vite preview` (port 5183).
+- **Install**: Chrome/Android get an Install button; iPhone gets Add to Home
+  Screen steps. On iPhone, push only works once installed (iOS 16.4+).
+- **Push**: Web Push with VAPID (`server/push.js`). Customers: deposit seen,
+  credited, held, held deposit approved. Admins: deposit held, customer asked
+  for help. Subscriptions must point at a real push service (Google, Apple,
+  Mozilla, Microsoft); dead ones are removed automatically.
 
 ## Not built yet
 
