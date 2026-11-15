@@ -1,5 +1,7 @@
 [build]
-  command = "npm run migrate && npm run build"
+  command = "npm run build"
+  # Migrations in netlify/database/migrations are applied by Netlify Database
+  # right before each deploy is published.
   publish = "dist"
 
 [build.environment]

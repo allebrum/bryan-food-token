@@ -45,8 +45,10 @@ Without `RESEND_API_KEY`, sign-in links are printed in the API console.
 - **API**: Express (`server/app.js`) on Postgres (`server/db.js`). Locally via
   `server/dev.js`; on Netlify as a Functions v2 function on `/api/*`
   (`netlify/functions/api.mjs`).
-- **Migrations**: `db/migrations/*.sql`, applied by `npm run migrate`, which
-  the Netlify build runs before building.
+- **Migrations**: `netlify/database/migrations/<number>_<slug>.sql`. On
+  Netlify, Netlify Database applies new ones right before a deploy is
+  published (a failure blocks the publish). Locally, `npm run migrate`
+  applies them to the Docker database.
 - **Money**: integer cents. Every balance change writes a `ledger` row in the
   same transaction; `(kind, ref)` is unique so nothing applies twice.
   Purchases claim a card with `FOR UPDATE SKIP LOCKED` and debit with a

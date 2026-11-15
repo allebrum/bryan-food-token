@@ -1,13 +1,23 @@
 import pg from 'pg'
+import { getConnectionString } from '@netlify/database'
 import { config } from './config.js'
 
-if (!config.databaseUrl) throw new Error('No database: set DATABASE_URL, or add a Netlify Database (NETLIFY_DB_URL)')
-
-const local = /@(localhost|127\.0\.0\.1)[:/]/.test(config.databaseUrl)
+// DATABASE_URL locally; on Netlify, Netlify Database's NETLIFY_DB_URL or,
+// failing that, its own lookup.
+function connectionString() {
+  if (config.databaseUrl) return config.databaseUrl
+  try {
+    return getConnectionString()
+  } catch {
+    throw new Error('No database: set DATABASE_URL, or add a Netlify Database (Data & storage → Database)')
+  }
+}
+const url = connectionString()
+const local = /@(localhost|127\.0\.0\.1)[:/]/.test(url)
 
 // Small pool: serverless instances each hold their own.
 export const pool = new pg.Pool({
-  connectionString: config.databaseUrl,
+  connectionString: url,
   max: 3,
   idleTimeoutMillis: 10_000,
   connectionTimeoutMillis: 8_000,
