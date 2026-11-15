@@ -44,11 +44,13 @@ export default function AppRoot() {
   }, [refresh, verifying])
 
   // Keep the balance live while a deposit is confirming.
+  // Demo deposits settle in seconds; real ones advance once per block or so.
+  const realPending = !!me?.pending?.some((p) => p.required)
   useEffect(() => {
     if (!me?.pending?.length) return
-    const t = setInterval(refresh, 1200)
+    const t = setInterval(refresh, realPending ? 5000 : 1200)
     return () => clearInterval(t)
-  }, [me?.pending?.length, refresh])
+  }, [me?.pending?.length, realPending, refresh])
 
   const value = useMemo(
     () => ({

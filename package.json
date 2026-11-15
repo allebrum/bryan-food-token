@@ -9,9 +9,11 @@
     "dev:api": "node --env-file=.env --watch server/dev.js",
     "db:up": "docker compose up -d",
     "migrate": "node --env-file-if-exists=.env scripts/migrate.js",
-    "build": "vite build"
+    "build": "vite build",
+    "wallet:keygen": "node scripts/evm-keygen.js"
   },
   "dependencies": {
+    "ethers": "^6.17.0",
     "express": "^5.3.0",
     "lucide-react": "^1.73.0",
     "pg": "^8.23.1",

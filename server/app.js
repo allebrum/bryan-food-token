@@ -9,6 +9,8 @@ import { q, one, tx } from './db.js'
 import { encrypt, decrypt, cardNumberHash, newToken, sha256 } from './secrets.js'
 import { sendMagicLink } from './email.js'
 import { seedBrands, demoInventory, makeCardNumber, makePin } from './seed.js'
+import { allocateEvmAddress, confirmDeposits, ingestAlchemy, verifyAlchemySignature } from './deposits.js'
+import { EVM_NETWORKS, enabledEvmNetworks, evmEnabled } from './chains/evm.js'
 
 const app = express()
 app.disable('x-powered-by')
@@ -88,7 +90,8 @@ app.use((req, _res, next) => {
   if (req.url.startsWith('/.netlify/functions/api')) req.url = '/api' + req.url.slice('/.netlify/functions/api'.length)
   next()
 })
-app.use(express.json({ limit: '64kb' }))
+// Keep the raw body: webhook signatures are computed over the exact bytes.
+app.use(express.json({ limit: '512kb', verify: (req, _res, buf) => (req.rawBody = buf) }))
 
 // CSRF: state-changing requests must be JSON. Browsers can't send a
 // cross-site JSON POST with cookies without a CORS preflight we never allow.
@@ -142,6 +145,16 @@ async function requireAdmin(req) {
 
 // ---------- public config ----------
 app.get('/api/config', (_req, res) => res.json({ demoMode: config.demoMode }))
+
+// ---------- chain webhooks ----------
+// Alchemy Address Activity. Unsigned or mis-signed calls are rejected; a
+// 500 makes Alchemy retry, so only answer 200 once the rows are saved.
+app.post('/api/webhooks/alchemy', async (req, res) => {
+  const network = verifyAlchemySignature(req.rawBody, req.get('x-alchemy-signature'), req.body?.webhookId)
+  if (!network) fail(401, 'Bad signature.')
+  const { recorded } = await ingestAlchemy(network, req.body)
+  res.json({ ok: true, recorded })
+})
 
 // ---------- auth: magic links ----------
 app.post('/api/auth/request', async (req, res) => {
@@ -202,7 +215,8 @@ async function settleDemoDeposits(userId) {
   await q(
     `WITH done AS (
        UPDATE deposits SET status = 'complete', completed_at = now()
-       WHERE user_id = $1 AND status = 'confirming' AND created_at < now() - make_interval(secs => $2)
+       WHERE user_id = $1 AND status = 'confirming' AND block_number IS NULL AND tx_ref LIKE 'demo-%'
+         AND created_at < now() - make_interval(secs => $2)
        RETURNING id, user_id, usd_cents
      ), led AS (
        INSERT INTO ledger (user_id, amount_cents, kind, ref)
@@ -229,8 +243,44 @@ function cardView(c) {
   }
 }
 
+const NETWORK_LABEL = Object.fromEntries(Object.entries(EVM_NETWORKS).map(([k, v]) => [k, v.label]))
+const COIN_NAMES = { USDC: 'USD Coin', USDT: 'Tether', ETH: 'Ether', BNB: 'BNB', BTC: 'Bitcoin', SOL: 'Solana' }
+
+// Deposit options for the user: real EVM addresses when configured,
+// otherwise demo addresses in DEMO_MODE, otherwise none yet.
+async function walletsFor(u) {
+  if (evmEnabled()) {
+    const address = await allocateEvmAddress(u.id)
+    const byCoin = new Map()
+    for (const key of enabledEvmNetworks()) {
+      const net = EVM_NETWORKS[key]
+      for (const coin of [net.native.coin, ...Object.values(net.tokens).map((t) => t.coin)]) {
+        if (!byCoin.has(coin)) byCoin.set(coin, { coin, name: COIN_NAMES[coin] ?? coin, networks: [] })
+        byCoin.get(coin).networks.push({ key, label: net.label, address, minUsd: config.evm.minUsd[key] ?? 0, confirmations: net.confirmations })
+      }
+    }
+    const order = ['USDC', 'USDT', 'ETH', 'BNB']
+    return [...byCoin.values()].sort((a, b) => order.indexOf(a.coin) - order.indexOf(b.coin))
+  }
+  if (u.demo_wallets) {
+    return Object.entries(u.demo_wallets).map(([coin, address]) => ({
+      coin,
+      name: COINS[coin].name,
+      demo: true,
+      networks: [{ key: 'demo', label: COINS[coin].network, address, minUsd: 0, confirmations: 0 }],
+    }))
+  }
+  return []
+}
+
+const DEPOSIT_STATUS_TEXT = { confirming: 'Confirming…', held: 'Held — below minimum', reverted: 'Didn’t go through', ignored: 'Unsupported coin — contact support' }
+
 async function meView(user) {
   if (config.demoMode) await settleDemoDeposits(user.id)
+  // While a user waits on a real deposit, check its confirmations now rather
+  // than waiting for the scheduled sync.
+  const waiting = await one(`SELECT 1 FROM deposits WHERE user_id = $1 AND status = 'confirming' AND block_number IS NOT NULL LIMIT 1`, [user.id])
+  if (waiting) await confirmDeposits({ userId: user.id })
   const [u, deposits, cards] = await Promise.all([
     one('SELECT * FROM users WHERE id = $1', [user.id]),
     q('SELECT * FROM deposits WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30', [user.id]),
@@ -256,9 +306,10 @@ async function meView(user) {
       type: 'deposit',
       status: d.status,
       at: d.created_at,
-      title: `Added ${d.coin}`,
-      detail: `${Number(d.amount)} ${d.coin}`,
-      cents: Number(d.usd_cents),
+      // An unsupported token's symbol is whatever its contract claims; don't echo it.
+      title: d.status === 'ignored' ? 'Unsupported token received' : `Added ${d.coin}`,
+      detail: d.status === 'complete' ? `${Number(d.amount)} ${d.coin}${NETWORK_LABEL[d.network] ? ` on ${NETWORK_LABEL[d.network]}` : ''}` : DEPOSIT_STATUS_TEXT[d.status],
+      cents: d.status === 'complete' ? Number(d.usd_cents) : 0,
     })),
     ...cards.rows.map((c) => ({
       id: c.id,
@@ -281,8 +332,19 @@ async function meView(user) {
     balance: Number(u.balance_cents),
     pending: deposits.rows
       .filter((d) => d.status === 'confirming')
-      .map((d) => ({ id: d.id, coin: d.coin, amount: Number(d.amount), usdCents: Number(d.usd_cents), createdAt: d.created_at, confirmMs: CONFIRM_SECONDS * 1000 })),
-    wallets: u.demo_wallets ? Object.entries(u.demo_wallets).map(([coin, address]) => ({ coin, address, ...COINS[coin] })) : [],
+      .map((d) => ({
+        id: d.id,
+        coin: d.coin,
+        amount: Number(d.amount),
+        network: NETWORK_LABEL[d.network] ?? null,
+        usdCents: d.usd_cents == null ? null : Number(d.usd_cents),
+        createdAt: d.created_at,
+        // Real deposits report block confirmations; demo ones a timer.
+        confirmations: d.confirmations,
+        required: d.required_confirmations,
+        confirmMs: d.required_confirmations ? null : CONFIRM_SECONDS * 1000,
+      })),
+    wallets: await walletsFor(u),
     cards: cards.rows.map((c) => ({
       ...cardView(c),
       balanceHistory: histories.filter((h) => h.card_id === c.id).map((h) => ({ at: h.created_at, balance: h.balance_cents, note: h.note })),

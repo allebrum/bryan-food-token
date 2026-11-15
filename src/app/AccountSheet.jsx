@@ -25,9 +25,9 @@ export default function AccountSheet({ open, onClose }) {
             <CoinBadge coin={w.coin} size="size-10" />
             <span className="min-w-0">
               <span className="block text-sm font-semibold">
-                {w.name} <span className="font-normal text-muted">· {w.network}</span>
+                {w.name} <span className="font-normal text-muted">· {w.networks.map((n) => n.label).join(', ')}</span>
               </span>
-              <span className="block truncate font-mono text-[13px] text-muted">{w.address}</span>
+              <span className="block truncate font-mono text-[13px] text-muted">{w.networks[0].address}</span>
             </span>
           </li>
         ))}

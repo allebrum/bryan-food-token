@@ -33,6 +33,12 @@ Without `RESEND_API_KEY`, sign-in links are printed in the API console.
 | `EMAIL_FROM` | prod | Sender on a domain verified in Resend, e.g. `Food Token <signin@yourdomain.com>`. |
 | `CARD_ENCRYPTION_KEY` | yes | 32 random bytes, base64. Encrypts card numbers, PINs and e-gift links. **Back it up** — losing it makes stored cards unreadable. |
 | `DEMO_MODE` | no | `true` = simulated deposits, fake addresses, demo inventory, demo banner. |
+| `EVM_XPUB` | for deposits | Extended public key from `npm run wallet:keygen`. |
+| `ALCHEMY_API_KEY` | for deposits | RPC and token prices. |
+| `ALCHEMY_AUTH_TOKEN` | for deposits | Notify API token; registers new addresses on the webhooks. |
+| `ALCHEMY_<NET>_WEBHOOK_ID`, `ALCHEMY_<NET>_SIGNING_KEY` | per network | `<NET>` = `ETHEREUM`, `BASE`, `BSC`. A network goes live when both are set. |
+| `MIN_DEPOSIT_USD_<NET>` | no | Defaults: Ethereum 20, Base 2, BSC 2. Smaller deposits are held. |
+| `TREASURY_ADDRESSES` | no | Company wallets; transfers from them are never credited. |
 
 ## How it's built
 
@@ -54,8 +60,24 @@ Without `RESEND_API_KEY`, sign-in links are printed in the API console.
   Admin lists show only the last 4 digits; the full card is fetched one at a
   time, only by its owner, when they open it. Admin actions go to `audit_log`.
 
+## Deposits (EVM)
+
+- **Addresses**: each user gets one HD-derived address (`m/44'/60'/0'/0/<n>`,
+  the MetaMask path) that works on Ethereum, Base and BNB Smart Chain. The
+  server holds only the xpub, so it can create addresses but can't move funds.
+- **Detection**: one Alchemy Address Activity webhook per network posts to
+  `/api/webhooks/alchemy`. Calls are verified with HMAC-SHA256 over the raw
+  body; unknown tokens are recorded but never credited.
+- **Crediting**: after the network's confirmation count (Ethereum 12, Base 10,
+  BSC 15) the receipt is re-checked, the coin is priced (stablecoins at $1,
+  ETH/BNB via Alchemy Prices), and the balance, ledger and deposit update in
+  one statement. A scheduled function (`deposits-sync`, every 10 min) does
+  this; users watching a deposit trigger it sooner.
+- **Accepted**: USDC (Ethereum, Base, BSC), USDT (Ethereum, BSC), ETH
+  (Ethereum, Base), BNB (BSC).
+
 ## Not built yet
 
-Real deposit addresses and deposit detection, and the scheduled sweep to the
-company treasury wallet. Until then, run with `DEMO_MODE=true`; without it the
-"Add crypto" sheet says deposits open soon.
+Solana, Tron, Bitcoin, Dogecoin and XRP deposits; the scheduled sweep to
+the company treasury wallet; a daily balance reconciliation that catches
+missed webhooks; and a way for an admin to credit held deposits.

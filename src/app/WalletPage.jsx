@@ -135,13 +135,15 @@ export default function WalletPage() {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-semibold">{a.title}</span>
                   <span className="block truncate text-sm text-muted">
-                    {a.status === 'confirming' ? 'Confirming…' : a.detail} · {ago(a.at)}
+                    {a.detail} · {ago(a.at)}
                   </span>
                 </span>
-                <span className={`tabular font-bold ${a.cents > 0 ? 'text-save' : ''} ${a.status === 'confirming' ? 'opacity-50' : ''}`}>
-                  {a.cents > 0 ? '+' : '−'}
-                  {money(Math.abs(a.cents))}
-                </span>
+                {a.cents !== 0 && (
+                  <span className={`tabular font-bold ${a.cents > 0 ? 'text-save' : ''}`}>
+                    {a.cents > 0 ? '+' : '−'}
+                    {money(Math.abs(a.cents))}
+                  </span>
+                )}
               </li>
             ))}
           </ul>
@@ -161,15 +163,20 @@ function Stat({ label, value, tone }) {
 }
 
 function PendingRow({ d }) {
-  const elapsed = Date.now() - new Date(d.createdAt).getTime()
-  const pct = Math.min(100, Math.round((elapsed / d.confirmMs) * 100))
+  const pct = d.required
+    ? Math.min(100, Math.round((d.confirmations / d.required) * 100))
+    : Math.min(100, Math.round(((Date.now() - new Date(d.createdAt).getTime()) / d.confirmMs) * 100))
   return (
     <div className="relative mt-5 rounded-2xl bg-white/10 p-4" role="status">
       <div className="flex items-center justify-between gap-3">
         <span className="font-semibold">
-          +{money(d.usdCents)} arriving <span className="font-normal text-white/60">· {d.amount} {d.coin}</span>
+          {d.usdCents != null ? `+${money(d.usdCents)} arriving` : `${d.amount} ${d.coin} arriving`}
+          <span className="font-normal text-white/60">
+            {d.usdCents != null ? ` · ${d.amount} ${d.coin}` : ''}
+            {d.network ? ` · ${d.network}` : ''}
+          </span>
         </span>
-        <span className="text-sm text-white/60">Confirming</span>
+        <span className="text-sm text-white/60">{d.required ? `${Math.min(d.confirmations, d.required)}/${d.required}` : 'Confirming'}</span>
       </div>
       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/15">
         <div className="h-full rounded-full bg-accent transition-all duration-1000" style={{ width: `${pct}%` }} />
