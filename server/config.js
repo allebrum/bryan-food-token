@@ -7,7 +7,9 @@ const bool = (v) => ['1', 'true', 'yes', 'on'].includes(String(v ?? '').toLowerC
 export const config = {
   production: env.CONTEXT === 'production' || env.NODE_ENV === 'production',
   appUrl: (env.APP_URL || env.URL || 'http://localhost:5180').replace(/\/$/, ''),
-  databaseUrl: env.DATABASE_URL || env.NETLIFY_DATABASE_URL || '',
+  // NETLIFY_DB_URL: Netlify Database (set automatically in builds and functions).
+  // NETLIFY_DATABASE_URL: the older Netlify DB / Neon extension.
+  databaseUrl: env.DATABASE_URL || env.NETLIFY_DB_URL || env.NETLIFY_DATABASE_URL || '',
   adminEmails: new Set(
     String(env.ADMIN_EMAILS || '')
       .split(',')

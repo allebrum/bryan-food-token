@@ -1,7 +1,7 @@
 import pg from 'pg'
 import { config } from './config.js'
 
-if (!config.databaseUrl) throw new Error('DATABASE_URL (or NETLIFY_DATABASE_URL) is not set')
+if (!config.databaseUrl) throw new Error('No database: set DATABASE_URL, or add a Netlify Database (NETLIFY_DB_URL)')
 
 const local = /@(localhost|127\.0\.0\.1)[:/]/.test(config.databaseUrl)
 

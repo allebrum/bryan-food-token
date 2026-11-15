@@ -26,7 +26,7 @@ Without `RESEND_API_KEY`, sign-in links are printed in the API console.
 
 | Variable | Required | What |
 | --- | --- | --- |
-| `NETLIFY_DATABASE_URL` / `DATABASE_URL` | yes | Postgres. Netlify DB sets the first automatically. |
+| `NETLIFY_DB_URL` / `DATABASE_URL` | yes | Postgres. Adding a Netlify Database (Data & storage → Database) sets the first automatically. |
 | `APP_URL` | yes | Public site URL, used in sign-in emails (e.g. `https://bryans-food-token.netlify.app`). |
 | `ADMIN_EMAILS` | yes | Comma-separated emails allowed into `/admin`. |
 | `RESEND_API_KEY` | prod | Resend API key. |
