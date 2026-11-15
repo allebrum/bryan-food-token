@@ -6,6 +6,10 @@ import { config } from '../config.js'
 // webhook's own symbol/decimals: an unknown contract is not credited.
 export const EVM_NETWORKS = {
   ethereum: {
+    explorer: 'https://etherscan.io/tx/',
+    // Extra we suggest on top of the minimum: exchanges take their
+    // withdrawal fee out of the amount sent.
+    sendBufferUsd: 5,
     label: 'Ethereum',
     alchemy: 'eth-mainnet',
     confirmations: 12,
@@ -16,6 +20,10 @@ export const EVM_NETWORKS = {
     },
   },
   base: {
+    explorer: 'https://basescan.org/tx/',
+    // Extra we suggest on top of the minimum: exchanges take their
+    // withdrawal fee out of the amount sent.
+    sendBufferUsd: 1,
     label: 'Base',
     alchemy: 'base-mainnet',
     confirmations: 10,
@@ -25,6 +33,10 @@ export const EVM_NETWORKS = {
     },
   },
   bsc: {
+    explorer: 'https://bscscan.com/tx/',
+    // Extra we suggest on top of the minimum: exchanges take their
+    // withdrawal fee out of the amount sent.
+    sendBufferUsd: 1,
     label: 'BNB Smart Chain (BEP-20)',
     alchemy: 'bnb-mainnet',
     confirmations: 15,

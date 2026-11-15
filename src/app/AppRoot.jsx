@@ -12,6 +12,7 @@ import DepositFlow from './DepositFlow'
 import BuyFlow from './BuyFlow'
 import CardSheet from './CardSheet'
 import AccountSheet from './AccountSheet'
+import DepositHelpSheet from './DepositHelp'
 
 const Ctx = createContext(null)
 export const useAccount = () => useContext(Ctx)
@@ -61,6 +62,7 @@ export default function AppRoot() {
       openBuy: (store) => setFlow({ kind: 'buy', store }),
       openCard: (cardId) => setFlow({ kind: 'card', cardId }),
       openAccount: () => setFlow({ kind: 'account' }),
+      openDepositHelp: (depositId) => setFlow({ kind: 'deposit-help', depositId }),
       closeFlow: () => setFlow(null),
       signOut: async () => {
         await api('/auth/logout', { method: 'POST', body: {} }).catch(() => {})
@@ -101,6 +103,7 @@ export default function AppRoot() {
           <BuyFlow store={flow?.kind === 'buy' ? flow.store : null} onClose={value.closeFlow} />
           <CardSheet cardId={flow?.kind === 'card' ? flow.cardId : null} onClose={value.closeFlow} />
           <AccountSheet open={flow?.kind === 'account'} onClose={value.closeFlow} />
+          <DepositHelpSheet depositId={flow?.kind === 'deposit-help' ? flow.depositId : null} onClose={value.closeFlow} />
           <WelcomeSheet />
         </>
       )}

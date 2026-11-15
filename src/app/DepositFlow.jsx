@@ -8,6 +8,7 @@ import { api } from '../lib/api'
 import { COIN_COPY, NETWORK_HINT } from '../lib/coins'
 import { money } from '../lib/format'
 import { useAccount } from './AppRoot'
+import { DepositHelp } from './DepositHelp'
 
 // coin → network (only if there's a choice) → address → watching/arrived
 export default function DepositFlow({ open, onClose }) {
@@ -128,6 +129,7 @@ export default function DepositFlow({ open, onClose }) {
                     <span className="block text-lg font-bold">{n.label}</span>
                     <span className="block text-[15px] text-muted">{NETWORK_HINT[n.key] ?? ''}</span>
                   </span>
+                  {n.minUsd > 0 && <span className="shrink-0 rounded-full bg-canvas px-3 py-1 text-sm font-semibold text-ink-2">Min {money(n.minUsd * 100, { whole: true })}</span>}
                   <ChevronRight className="size-5 text-muted" />
                 </button>
               </li>
@@ -156,9 +158,19 @@ export default function DepositFlow({ open, onClose }) {
             <AlertTriangle className="mt-0.5 size-5 shrink-0" />
             <p>
               Only send <b>{wallet.coin}</b> on <b>{net.label}</b>. Other coins or networks may be lost.
-              {net.minUsd > 0 && <> Minimum {money(net.minUsd * 100, { whole: true })}.</>}
             </p>
           </div>
+          {net.minUsd > 0 && (
+            <div className="mt-3 rounded-2xl bg-canvas p-4 text-[15px]">
+              <p className="font-bold">
+                Minimum {money(net.minUsd * 100, { whole: true })} on {net.label} — we suggest sending at least {money(net.suggestUsd * 100, { whole: true })}
+              </p>
+              <p className="mt-1 text-muted">
+                Exchanges like Binance and Coinbase take their fee out of what you send, so less arrives than you enter. Anything that lands under the
+                minimum waits for a manual review instead of going straight into your balance.
+              </p>
+            </div>
+          )}
           <Button size="lg" block className="mt-6" onClick={() => setStep('watch')}>
             I’ve sent it
           </Button>
@@ -239,14 +251,7 @@ export default function DepositFlow({ open, onClose }) {
             </>
           )}
 
-          {deposit && !['confirming', 'complete'].includes(deposit.status) && (
-            <>
-              <SheetTitle title="We received it, but couldn’t add it">{deposit.detail}. Contact support and we’ll sort it out.</SheetTitle>
-              <Button size="lg" block onClick={onClose} data-autofocus>
-                Close
-              </Button>
-            </>
-          )}
+          {deposit && !['confirming', 'complete'].includes(deposit.status) && <DepositHelp depositId={deposit.id} onDone={onClose} />}
         </div>
       )}
     </Modal>

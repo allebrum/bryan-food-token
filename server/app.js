@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto'
 import { config, isAdminEmail } from './config.js'
 import { q, one, tx } from './db.js'
 import { encrypt, decrypt, cardNumberHash, newToken, sha256 } from './secrets.js'
-import { sendMagicLink } from './email.js'
+import { sendMagicLink, sendDepositHelpRequest } from './email.js'
 import { seedBrands, demoInventory, makeCardNumber, makePin } from './seed.js'
 import { allocateEvmAddress, confirmDeposits, ingestAlchemy, verifyAlchemySignature } from './deposits.js'
 import { EVM_NETWORKS, enabledEvmNetworks, evmEnabled } from './chains/evm.js'
@@ -256,7 +256,8 @@ async function walletsFor(u) {
       const net = EVM_NETWORKS[key]
       for (const coin of [net.native.coin, ...Object.values(net.tokens).map((t) => t.coin)]) {
         if (!byCoin.has(coin)) byCoin.set(coin, { coin, name: COIN_NAMES[coin] ?? coin, networks: [] })
-        byCoin.get(coin).networks.push({ key, label: net.label, address, minUsd: config.evm.minUsd[key] ?? 0, confirmations: net.confirmations })
+        const minUsd = config.evm.minUsd[key] ?? 0
+        byCoin.get(coin).networks.push({ key, label: net.label, address, minUsd, suggestUsd: minUsd ? minUsd + net.sendBufferUsd : 0, confirmations: net.confirmations })
       }
     }
     const order = ['USDC', 'USDT', 'ETH', 'BNB']
@@ -273,7 +274,17 @@ async function walletsFor(u) {
   return []
 }
 
-const DEPOSIT_STATUS_TEXT = { confirming: 'Confirming…', held: 'Held — below minimum', reverted: 'Didn’t go through', ignored: 'Unsupported coin — contact support' }
+// Plain-language status for a deposit that isn't (yet) in the balance.
+function depositStatusText(d) {
+  const on = NETWORK_LABEL[d.network] ? ` on ${NETWORK_LABEL[d.network]}` : ''
+  if (d.status === 'confirming') return 'Confirming…'
+  if (d.status === 'held') return `Pending review — below the${d.note?.match(/\$\d+/) ? ` ${d.note.match(/\$\d+/)[0]}` : ''} minimum${on}`
+  if (d.status === 'reverted') return 'Didn’t go through'
+  if (d.status === 'ignored') return 'Unsupported coin — tap for help'
+  return ''
+}
+const NEEDS_HELP = new Set(['held', 'ignored', 'reverted'])
+const explorerUrl = (d) => (EVM_NETWORKS[d.network] ? EVM_NETWORKS[d.network].explorer + d.tx_ref.split(':')[0] : null)
 
 async function meView(user) {
   if (config.demoMode) await settleDemoDeposits(user.id)
@@ -308,7 +319,9 @@ async function meView(user) {
       at: d.created_at,
       // An unsupported token's symbol is whatever its contract claims; don't echo it.
       title: d.status === 'ignored' ? 'Unsupported token received' : `Added ${d.coin}`,
-      detail: d.status === 'complete' ? `${Number(d.amount)} ${d.coin}${NETWORK_LABEL[d.network] ? ` on ${NETWORK_LABEL[d.network]}` : ''}` : DEPOSIT_STATUS_TEXT[d.status],
+      detail: d.status === 'complete' ? `${Number(d.amount)} ${d.coin}${NETWORK_LABEL[d.network] ? ` on ${NETWORK_LABEL[d.network]}` : ''}` : depositStatusText(d),
+      needsHelp: NEEDS_HELP.has(d.status),
+      supportRequested: !!d.support_requested_at,
       cents: d.status === 'complete' ? Number(d.usd_cents) : 0,
     })),
     ...cards.rows.map((c) => ({
@@ -330,6 +343,20 @@ async function meView(user) {
     email: u.email,
     isAdmin: isAdminEmail(u.email),
     balance: Number(u.balance_cents),
+    // Received but not credited: shown on the balance card so a customer
+    // never sees $0 with no explanation after sending money.
+    held: deposits.rows
+      .filter((d) => d.status === 'held')
+      .map((d) => ({
+        id: d.id,
+        coin: d.coin,
+        amount: Number(d.amount),
+        network: NETWORK_LABEL[d.network] ?? d.network,
+        usdCents: d.usd_cents == null ? null : Number(d.usd_cents),
+        minUsd: config.evm.minUsd[d.network] ?? null,
+        supportRequested: !!d.support_requested_at,
+        createdAt: d.created_at,
+      })),
     pending: deposits.rows
       .filter((d) => d.status === 'confirming')
       .map((d) => ({
@@ -382,6 +409,44 @@ app.post('/api/deposits/simulate', async (req, res) => {
     [user.id, coin, network, amount, rate, Math.round(amount * rate * 100), `demo-${newToken()}`],
   )
   res.json(await meView(user))
+})
+
+// A customer asks for help with a held / unsupported / failed deposit.
+// One email per deposit: the request is claimed atomically before sending,
+// and released again if the email fails.
+app.post('/api/deposits/:id/help', async (req, res) => {
+  const user = await requireUser(req)
+  const message = str(req.body?.message, 1000)
+  const id = str(req.params.id, 40)
+  const d = await one(`SELECT * FROM deposits WHERE id = $1 AND user_id = $2`, [id, user.id])
+  if (!d || !NEEDS_HELP.has(d.status)) fail(404, 'Deposit not found.')
+  if (d.support_requested_at) return res.json({ ok: true, already: true })
+  const claimed = await q(
+    `UPDATE deposits SET support_requested_at = now(), support_message = $3 WHERE id = $1 AND user_id = $2 AND support_requested_at IS NULL`,
+    [id, user.id, message || null],
+  )
+  if (!claimed.rowCount) return res.json({ ok: true, already: true })
+  try {
+    await sendDepositHelpRequest({
+      user,
+      deposit: {
+        coin: d.coin,
+        amount: Number(d.amount),
+        networkLabel: NETWORK_LABEL[d.network] ?? d.network,
+        usdCents: d.usd_cents == null ? null : Number(d.usd_cents),
+        txRef: d.tx_ref,
+        createdAt: d.created_at,
+      },
+      reason: depositStatusText(d),
+      message,
+      explorerUrl: explorerUrl(d),
+      adminUrl: `${config.appUrl}/admin/deposits`,
+    })
+  } catch (err) {
+    await q(`UPDATE deposits SET support_requested_at = NULL, support_message = NULL WHERE id = $1`, [id])
+    throw err
+  }
+  res.json({ ok: true })
 })
 
 // ---------- stores ----------
@@ -509,7 +574,7 @@ app.get('/api/admin/overview', async (_req, res) => {
     one(`SELECT count(*)::int AS count, COALESCE(sum(face_cents),0)::bigint AS face, COALESCE(sum(cost_cents),0)::bigint AS cost FROM gift_cards WHERE status = 'available'`),
     one(`SELECT count(*)::int AS count, COALESCE(sum(sale_cents),0)::bigint AS revenue, COALESCE(sum(cost_cents),0)::bigint AS cost, COALESCE(sum(face_cents),0)::bigint AS face FROM gift_cards WHERE status = 'sold'`),
     one('SELECT count(*)::int AS count, COALESCE(sum(balance_cents),0)::bigint AS balances FROM users'),
-    one(`SELECT count(*)::int AS count, COALESCE(sum(usd_cents) FILTER (WHERE status = 'complete'),0)::bigint AS usd FROM deposits`),
+    one(`SELECT count(*)::int AS count, COALESCE(sum(usd_cents) FILTER (WHERE status = 'complete'),0)::bigint AS usd, count(*) FILTER (WHERE status IN ('held', 'ignored'))::int AS review FROM deposits`),
     q(`SELECT b.id, b.name, b.color, count(g.id)::int AS count FROM brands b
        LEFT JOIN gift_cards g ON g.brand_id = b.id AND g.status = 'available'
        WHERE b.active GROUP BY b.id HAVING count(g.id) < 6 ORDER BY count(g.id), b.name`),
@@ -522,7 +587,7 @@ app.get('/api/admin/overview', async (_req, res) => {
     inventory: { count: inv.count, faceValue: n(inv.face), cost: n(inv.cost) },
     sales: { count: sales.count, revenue: n(sales.revenue), cost: n(sales.cost), profit: n(sales.revenue) - n(sales.cost), faceValue: n(sales.face) },
     customers: { count: customers.count, balances: n(customers.balances) },
-    deposits: { count: deposits.count, usd: n(deposits.usd) },
+    deposits: { count: deposits.count, usd: n(deposits.usd), needsReview: deposits.review },
     lowStock: low.rows,
     recentSales: recent.rows.map((r) => ({
       id: r.id,
@@ -679,6 +744,58 @@ app.put('/api/admin/brands/:id', async (req, res) => {
     await audit(c, req.admin.email, 'brand.update', { id: b.id, buy, sell, active })
   })
   res.json({ ok: true })
+})
+
+// Deposits needing attention first (held, unsupported), newest first.
+app.get('/api/admin/deposits', async (req, res) => {
+  const status = str(req.query.status, 20)
+  const { rows } = await q(
+    `SELECT d.*, u.email, u.name FROM deposits d JOIN users u ON u.id = d.user_id
+     WHERE ($1 = '' OR d.status = $1) AND ($1 <> '' OR d.tx_ref NOT LIKE 'demo-%')
+     ORDER BY (d.status IN ('held', 'ignored')) DESC, d.created_at DESC LIMIT 300`,
+    [status],
+  )
+  res.json(
+    rows.map((d) => ({
+      id: d.id,
+      status: d.status,
+      // An unsupported token's symbol and our placeholder amount mean nothing;
+      // show its contract instead.
+      coin: d.status === 'ignored' ? 'Unknown token' : d.coin,
+      amount: d.status === 'ignored' ? null : Number(d.amount),
+      contract: d.status === 'ignored' ? d.asset : null,
+      network: NETWORK_LABEL[d.network] ?? d.network,
+      usdCents: d.usd_cents == null ? null : Number(d.usd_cents),
+      note: d.note,
+      customer: `${d.name || 'No name yet'} (${d.email})`,
+      createdAt: d.created_at,
+      completedAt: d.completed_at,
+      creditedBy: d.credited_by,
+      supportRequestedAt: d.support_requested_at,
+      supportMessage: d.support_message,
+      explorerUrl: explorerUrl(d),
+    })),
+  )
+})
+
+// Credit a held deposit at the USD value it was priced at when confirmed.
+// Status-guarded, so a deposit can only ever be credited once.
+app.post('/api/admin/deposits/:id/credit', async (req, res) => {
+  const id = str(req.params.id, 40)
+  const credited = await tx(async (c) => {
+    const r = await c.query(
+      `UPDATE deposits SET status = 'complete', completed_at = now(), credited_by = $2
+       WHERE id = $1 AND status = 'held' AND usd_cents > 0 RETURNING id, user_id, usd_cents`,
+      [id, req.admin.email],
+    )
+    if (!r.rowCount) fail(409, 'Only held deposits with a dollar value can be credited.')
+    const d = r.rows[0]
+    await c.query(`INSERT INTO ledger (user_id, amount_cents, kind, ref) VALUES ($1, $2, 'deposit', $3)`, [d.user_id, d.usd_cents, d.id])
+    await c.query(`UPDATE users SET balance_cents = balance_cents + $2 WHERE id = $1`, [d.user_id, d.usd_cents])
+    await audit(c, req.admin.email, 'deposit.credit_held', { id: d.id, usdCents: Number(d.usd_cents) })
+    return Number(d.usd_cents)
+  })
+  res.json({ ok: true, credited })
 })
 
 app.get('/api/admin/customers', async (_req, res) => {

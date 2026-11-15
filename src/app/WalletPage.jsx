@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Plus, ShoppingBag, ArrowDownLeft, CreditCard, Info, Search } from 'lucide-react'
+import { Plus, ShoppingBag, ArrowDownLeft, CreditCard, Info, Search, Clock, ChevronRight } from 'lucide-react'
 import Button from '../components/Button'
 import GiftCardPass from '../components/GiftCardPass'
 import Stack from '../components/Stack'
@@ -14,7 +14,7 @@ function greeting() {
 }
 
 export default function WalletPage() {
-  const { me, openDeposit, openCard } = useAccount()
+  const { me, openDeposit, openCard, openDepositHelp } = useAccount()
   const [showUsed, setShowUsed] = useState(false)
   const active = me.cards.filter((c) => c.balance > 0)
   const used = me.cards.filter((c) => c.balance === 0)
@@ -46,6 +46,9 @@ export default function WalletPage() {
 
           {me.pending.map((d) => (
             <PendingRow key={d.id} d={d} />
+          ))}
+          {me.held.map((d) => (
+            <HeldRow key={d.id} d={d} onOpen={() => openDepositHelp(d.id)} />
           ))}
 
           <div className="relative mt-8 grid grid-cols-2 gap-3">
@@ -127,11 +130,14 @@ export default function WalletPage() {
         ) : (
           <ul className="divide-y divide-line overflow-hidden rounded-[var(--radius-pass)] bg-white shadow-[var(--shadow-soft)]">
             {me.activity.map((a) => (
-              <li key={a.id} className="flex items-center gap-4 px-5 py-4">
+              <li key={a.id}>
+                <ActivityRow a={a} onOpen={a.needsHelp ? () => openDepositHelp(a.id) : undefined}>
                 <span
-                  className={`grid size-11 shrink-0 place-items-center rounded-full ${a.type === 'deposit' ? 'bg-save-soft text-save' : 'bg-canvas text-ink'}`}
+                  className={`grid size-11 shrink-0 place-items-center rounded-full ${
+                    a.needsHelp ? 'bg-amber-50 text-amber-600' : a.type === 'deposit' ? 'bg-save-soft text-save' : 'bg-canvas text-ink'
+                  }`}
                 >
-                  {a.type === 'deposit' ? <ArrowDownLeft className="size-5" /> : <CreditCard className="size-5" />}
+                  {a.needsHelp ? <Clock className="size-5" /> : a.type === 'deposit' ? <ArrowDownLeft className="size-5" /> : <CreditCard className="size-5" />}
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-semibold">{a.title}</span>
@@ -145,12 +151,46 @@ export default function WalletPage() {
                     {money(Math.abs(a.cents))}
                   </span>
                 )}
+                </ActivityRow>
               </li>
             ))}
           </ul>
         )}
       </aside>
     </div>
+  )
+}
+
+// A row is a button only when it leads somewhere (a deposit that needs help).
+function ActivityRow({ a, onOpen, children }) {
+  const cls = 'flex w-full items-center gap-4 px-5 py-4 text-left'
+  return onOpen ? (
+    <button onClick={onOpen} className={`${cls} hover:bg-canvas`} aria-label={`${a.title}: ${a.detail}`}>
+      {children}
+      <ChevronRight className="size-5 shrink-0 text-muted" />
+    </button>
+  ) : (
+    <div className={cls}>{children}</div>
+  )
+}
+
+// Money that arrived but isn't spendable yet (below the minimum).
+function HeldRow({ d, onOpen }) {
+  return (
+    <button onClick={onOpen} className="relative mt-5 flex w-full items-center gap-3 rounded-2xl bg-white/10 p-4 text-left hover:bg-white/15">
+      <Clock className="size-5 shrink-0 text-amber-300" />
+      <span className="min-w-0 flex-1">
+        <span className="block font-semibold">
+          {d.usdCents != null ? `+${money(d.usdCents)}` : `${d.amount} ${d.coin}`} pending review
+        </span>
+        <span className="block text-sm text-white/60">
+          {d.amount} {d.coin} on {d.network}
+          {d.minUsd ? ` · below the ${money(d.minUsd * 100, { whole: true })} minimum` : ''}
+          {d.supportRequested ? ' · we’re on it' : ''}
+        </span>
+      </span>
+      <ChevronRight className="size-5 shrink-0 text-white/60" />
+    </button>
   )
 }
 

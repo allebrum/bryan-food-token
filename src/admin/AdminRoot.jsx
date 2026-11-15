@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Routes, Route, NavLink, Link, Navigate } from 'react-router-dom'
-import { LayoutDashboard, Package, Store, Users, Plus, Trash2, RotateCcw, ArrowUpRight } from 'lucide-react'
+import { LayoutDashboard, Package, Store, Users, Plus, Trash2, RotateCcw, ArrowUpRight, Coins, ExternalLink, Clock } from 'lucide-react'
 import Logo from '../components/Logo'
 import Button from '../components/Button'
 import Modal, { SheetTitle } from '../components/Modal'
@@ -60,6 +60,9 @@ function AdminShell() {
           <NavLink to="/admin/inventory" className={link}>
             <Package className="size-5" /> Inventory
           </NavLink>
+          <NavLink to="/admin/deposits" className={link}>
+            <Coins className="size-5" /> Deposits
+          </NavLink>
           <NavLink to="/admin/brands" className={link}>
             <Store className="size-5" /> Brands & margins
           </NavLink>
@@ -78,6 +81,7 @@ function AdminShell() {
         <Routes>
           <Route index element={<Overview />} />
           <Route path="inventory" element={<Inventory />} />
+          <Route path="deposits" element={<Deposits />} />
           <Route path="brands" element={<Brands />} />
           <Route path="customers" element={<Customers />} />
           <Route path="*" element={<Navigate to="/admin" replace />} />
@@ -135,6 +139,16 @@ function Overview() {
   return (
     <>
       <PageHead title="Overview" sub="How the gift card book is doing." />
+      {o.deposits.needsReview > 0 && (
+        <Link
+          to="/admin/deposits"
+          className="mb-6 flex items-center gap-3 rounded-[var(--radius-pass)] bg-amber-50 p-5 font-semibold text-amber-900 hover:bg-amber-100"
+        >
+          <Clock className="size-5 shrink-0" />
+          {o.deposits.needsReview} deposit{o.deposits.needsReview === 1 ? '' : 's'} waiting for review
+          <ArrowUpRight className="ml-auto size-5" />
+        </Link>
+      )}
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Profit" value={money(o.sales.profit)} sub={`${pct(margin)} of card value sold`} tone="save" />
         <Kpi label="Sales" value={money(o.sales.revenue)} sub={`${o.sales.count} cards sold`} />
@@ -417,6 +431,106 @@ function AddCards({ open, brands, onClose, onAdded }) {
         </form>
       )}
     </Modal>
+  )
+}
+
+// ---------------- Deposits ----------------
+const DEPOSIT_TABS = [
+  ['', 'Needs review first'],
+  ['held', 'Held'],
+  ['ignored', 'Unsupported'],
+  ['complete', 'Credited'],
+  ['confirming', 'Confirming'],
+  ['reverted', 'Failed'],
+]
+const STATUS_STYLE = {
+  held: 'bg-amber-50 text-amber-800',
+  ignored: 'bg-red-50 text-red-700',
+  reverted: 'bg-red-50 text-red-700',
+  confirming: 'bg-canvas text-ink-2',
+  complete: 'bg-save-soft text-save',
+}
+const STATUS_LABEL = { held: 'Held', ignored: 'Unsupported', reverted: 'Failed', confirming: 'Confirming', complete: 'Credited' }
+
+function Deposits() {
+  const [status, setStatus] = useState('')
+  const { data: rows, error, reload } = useLoad(`/admin/deposits?status=${status}`)
+  const [busy, setBusy] = useState(null)
+
+  const credit = async (d) => {
+    if (!confirm(`Add ${money(d.usdCents)} to ${d.customer}'s balance?`)) return
+    setBusy(d.id)
+    try {
+      await api(`/admin/deposits/${d.id}/credit`, { method: 'POST', body: {} })
+      reload()
+    } catch (e) {
+      alert(e.message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  return (
+    <>
+      <PageHead title="Deposits" sub="Crypto that arrived. Held deposits were under the minimum and wait for you to credit them." />
+      <div className="no-scrollbar mb-5 flex gap-2 overflow-x-auto">
+        {DEPOSIT_TABS.map(([k, l]) => (
+          <button
+            key={k || 'all'}
+            onClick={() => setStatus(k)}
+            aria-pressed={status === k}
+            className={`h-10 shrink-0 rounded-full px-4 text-sm font-semibold ${status === k ? 'bg-ink text-white' : 'bg-white shadow-[var(--shadow-soft)]'}`}
+          >
+            {l}
+          </button>
+        ))}
+      </div>
+      {error && <p className="text-red-600">{error}</p>}
+      {rows && rows.length === 0 && <Panel className="p-8 text-muted">Nothing here.</Panel>}
+      <div className="grid gap-3">
+        {rows?.map((d) => (
+          <Panel key={d.id} className="p-5">
+            <div className="flex flex-wrap items-start gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-lg font-bold">
+                    {d.amount != null ? `${d.amount} ` : ''}
+                    {d.coin}
+                  </span>
+                  <span className="text-muted">on {d.network}</span>
+                  <span className={`rounded-full px-2.5 py-0.5 text-xs font-bold ${STATUS_STYLE[d.status] ?? ''}`}>{STATUS_LABEL[d.status] ?? d.status}</span>
+                </div>
+                <p className="mt-1 text-sm text-muted">
+                  {d.customer} · {ago(d.createdAt)}
+                  {d.note ? ` · ${d.note}` : ''}
+                  {d.creditedBy ? ` · credited by ${d.creditedBy}` : ''}
+                </p>
+                {d.contract && <p className="mt-1 break-all font-mono text-xs text-muted">Contract {d.contract}</p>}
+                {d.supportRequestedAt && (
+                  <p className="mt-3 rounded-xl bg-canvas p-3 text-[15px]">
+                    <span className="font-semibold">Customer asked for help {ago(d.supportRequestedAt)}</span>
+                    {d.supportMessage ? <span className="mt-1 block whitespace-pre-wrap text-ink-2">“{d.supportMessage}”</span> : null}
+                  </p>
+                )}
+              </div>
+              <div className="flex shrink-0 flex-col items-end gap-2">
+                <span className="tabular text-xl font-extrabold">{d.usdCents != null ? money(d.usdCents) : '—'}</span>
+                {d.explorerUrl && (
+                  <a href={d.explorerUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 text-sm font-semibold text-muted hover:text-ink">
+                    View transaction <ExternalLink className="size-3.5" />
+                  </a>
+                )}
+                {d.status === 'held' && d.usdCents > 0 && (
+                  <Button size="sm" onClick={() => credit(d)} disabled={busy === d.id}>
+                    {busy === d.id ? 'Crediting…' : `Credit ${money(d.usdCents)}`}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </Panel>
+        ))}
+      </div>
+    </>
   )
 }
 
