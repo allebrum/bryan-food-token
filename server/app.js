@@ -1,494 +1,672 @@
-// Food Token demo API.
-// A small Express app shared by the customer app and the admin. Storage is
-// pluggable: a JSON file locally (server/dev.js), Netlify Blobs when deployed
-// (netlify/functions/api.mjs, Functions v2). Everything here is demo-grade: no auth, fake
-// wallet addresses, simulated deposits. Money is stored in integer cents.
+// Food Token API (Express on Postgres).
+// Runs locally via server/dev.js and on Netlify via netlify/functions/api.mjs.
+// Money is integer cents; every balance change writes a ledger row in the
+// same transaction. Gift card secrets are encrypted at rest (secrets.js).
 import express from 'express'
-import { randomUUID, randomBytes } from 'node:crypto'
-import { seed, makeCardNumber, makePin } from './seed.js'
+import { randomBytes } from 'node:crypto'
+import { config, isAdminEmail } from './config.js'
+import { q, one, tx } from './db.js'
+import { encrypt, decrypt, cardNumberHash, newToken, sha256 } from './secrets.js'
+import { sendMagicLink } from './email.js'
+import { seedBrands, demoInventory, makeCardNumber, makePin } from './seed.js'
 
-// ---------- store ----------
-// Each request loads the whole document, and persists it before responding
-// if anything changed. Requests are serialized within a process; separate
-// serverless instances can still race (last write wins) — fine for a demo,
-// not for real money.
-let store
-let db
-let dirty = false
-const save = () => {
-  dirty = true
-}
-let queue = Promise.resolve()
+const app = express()
+app.disable('x-powered-by')
 
-// ---------- coins ----------
-// Demo rates (USD). A real build would quote live and lock the rate on arrival.
+// ---------- coins (demo rates until real deposits land) ----------
 const COINS = {
-  USDC: { name: 'USD Coin', network: 'Ethereum (ERC-20)', usd: 1, decimals: 2, confirmations: 12 },
-  USDT: { name: 'Tether', network: 'Tron (TRC-20)', usd: 1, decimals: 2, confirmations: 20 },
-  BTC: { name: 'Bitcoin', network: 'Bitcoin', usd: 91250, decimals: 6, confirmations: 2 },
-  ETH: { name: 'Ether', network: 'Ethereum', usd: 3180, decimals: 5, confirmations: 12 },
-  SOL: { name: 'Solana', network: 'Solana', usd: 142, decimals: 3, confirmations: 32 },
+  USDC: { name: 'USD Coin', network: 'Ethereum (ERC-20)', usd: 1, decimals: 2 },
+  USDT: { name: 'Tether', network: 'Tron (TRC-20)', usd: 1, decimals: 2 },
+  BTC: { name: 'Bitcoin', network: 'Bitcoin', usd: 91250, decimals: 6 },
+  ETH: { name: 'Ether', network: 'Ethereum', usd: 3180, decimals: 5 },
+  SOL: { name: 'Solana', network: 'Solana', usd: 142, decimals: 3 },
 }
+const CONFIRM_SECONDS = 6
 const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 const b58 = (n) => Array.from(randomBytes(n), (x) => B58[x % 58]).join('')
 const BECH = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
 const bech = (n) => Array.from(randomBytes(n), (x) => BECH[x % 32]).join('')
-// DEMO SAFETY: every address contains characters its format forbids
-// ("O"/"M" aren't hex, "0"/"O" aren't base58, "o" isn't bech32), so no real
-// wallet will accept it and nobody can lose funds sending to a demo address.
-// Replace with real custody-provider addresses before taking real deposits.
-function makeWallets() {
+// DEMO SAFETY: each address contains characters its format forbids, so no
+// real wallet will send to it.
+function demoWallets() {
   const evm = '0xDEMO' + randomBytes(18).toString('hex')
-  return {
-    USDC: evm,
-    ETH: evm,
-    USDT: 'TDEMO0' + b58(28),
-    BTC: 'bc1qdemo' + bech(34),
-    SOL: 'DEMO0' + b58(39),
-  }
+  return { USDC: evm, ETH: evm, USDT: 'TDEMO0' + b58(28), BTC: 'bc1qdemo' + bech(34), SOL: 'DEMO0' + b58(39) }
 }
 
 // ---------- helpers ----------
-const now = () => new Date().toISOString()
-const brandById = (id) => db.brands.find((b) => b.id === id)
-const priceFor = (brand, faceValue) => Math.round(faceValue * (1 - brand.sellDiscount))
-const CONFIRM_MS = 6000
-
-function settleDeposits(user) {
-  let changed = false
-  for (const d of db.deposits) {
-    if (d.userId !== user.id || d.status !== 'confirming') continue
-    if (Date.now() - new Date(d.createdAt).getTime() >= CONFIRM_MS) {
-      d.status = 'complete'
-      d.completedAt = now()
-      user.balance += d.usdCents
-      changed = true
-    }
-  }
-  if (changed) save()
-}
-
-function publicCard(c) {
-  const brand = brandById(c.brandId)
-  return {
-    id: c.id,
-    brand: brand && { id: brand.id, name: brand.name, color: brand.color, category: brand.category },
-    faceValue: c.faceValue,
-    paid: c.salePrice,
-    balance: c.balance,
-    balanceHistory: c.balanceHistory,
-    cardNumber: c.cardNumber,
-    pin: c.pin,
-    purchasedAt: c.soldAt,
-    archived: !!c.archived,
+class HttpError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.status = status
   }
 }
+const fail = (status, message) => {
+  throw new HttpError(status, message)
+}
+const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '')
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
+const priceFor = (sellDiscount, face) => Math.round(face * (1 - Number(sellDiscount)))
+const audit = (client, actor, action, detail = {}) =>
+  client.query('INSERT INTO audit_log (actor, action, detail) VALUES ($1, $2, $3)', [actor, action, detail])
 
-function meView(user) {
-  settleDeposits(user)
-  const deposits = db.deposits.filter((d) => d.userId === user.id)
-  const cards = db.inventory.filter((c) => c.soldTo === user.id)
-  const activity = [
-    ...deposits.map((d) => ({
-      id: d.id,
-      type: 'deposit',
-      status: d.status,
-      at: d.createdAt,
-      title: `Added ${d.coin}`,
-      detail: `${d.amount} ${d.coin}`,
-      cents: d.usdCents,
-    })),
-    ...cards.map((c) => ({
-      id: c.id,
-      type: 'purchase',
-      status: 'complete',
-      at: c.soldAt,
-      title: `${brandById(c.brandId)?.name} gift card`,
-      detail: `$${(c.faceValue / 100).toFixed(0)} card · saved $${((c.faceValue - c.salePrice) / 100).toFixed(2)}`,
-      cents: -c.salePrice,
-    })),
-  ].sort((a, b) => (a.at < b.at ? 1 : -1))
-
-  return {
-    id: user.id,
-    name: user.name,
-    email: user.email,
-    balance: user.balance,
-    pending: deposits.filter((d) => d.status === 'confirming').map((d) => ({ ...d, confirmMs: CONFIRM_MS })),
-    wallets: Object.entries(user.wallets).map(([coin, address]) => ({ coin, address, ...COINS[coin] })),
-    cards: cards.map(publicCard).sort((a, b) => (a.purchasedAt < b.purchasedAt ? 1 : -1)),
-    saved: cards.reduce((s, c) => s + (c.faceValue - c.salePrice), 0),
-    activity: activity.slice(0, 30),
+// ---------- one-time seed ----------
+let seeded
+function ensureSeed() {
+  seeded ??= (async () => {
+    const { n } = await one('SELECT count(*)::int AS n FROM brands')
+    if (n > 0) return
+    await tx(async (c) => {
+      const brands = seedBrands()
+      for (const b of brands) {
+        await c.query(
+          `INSERT INTO brands (id, name, category, color, tagline, buy_discount, sell_discount, locations)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING`,
+          [b.id, b.name, b.category, b.color, b.tagline, b.buyDiscount, b.sellDiscount, JSON.stringify(b.locations)],
+        )
+      }
+      if (config.demoMode) await insertDemoInventory(c, brands)
+    })
+  })().catch((err) => {
+    seeded = undefined
+    throw err
+  })
+  return seeded
+}
+async function insertDemoInventory(c, brands) {
+  for (const card of demoInventory(brands)) {
+    await c.query(
+      `INSERT INTO gift_cards (brand_id, face_cents, cost_cents, number_enc, number_hash, last4, pin_enc, added_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'demo-seed') ON CONFLICT DO NOTHING`,
+      [card.brand.id, card.face, Math.round(card.face * (1 - card.brand.buyDiscount)), encrypt(card.number), cardNumberHash(card.number), card.number.slice(-4), encrypt(card.pin)],
+    )
   }
 }
 
-// ---------- app ----------
-const app = express()
-
+// ---------- middleware ----------
 // If a request arrives under the function's internal URL, put /api back.
 app.use((req, _res, next) => {
   if (req.url.startsWith('/.netlify/functions/api')) req.url = '/api' + req.url.slice('/.netlify/functions/api'.length)
   next()
 })
-app.use(express.json({ limit: '100kb' }))
+app.use(express.json({ limit: '64kb' }))
 
-app.use('/api', (req, res, next) => {
-  // Release the turn as soon as the response is sent (serverless-http's mock
-  // response doesn't reliably emit 'close', so don't depend on it alone).
-  let unlock
-  const turn = new Promise((r) => (unlock = r))
-  let released = false
-  const release = () => {
-    if (!released) (released = true), unlock()
-  }
-  const prev = queue
-  queue = queue.then(() => turn)
-  res.on('finish', release)
-  res.on('close', release)
-  prev
-    .then(async () => {
-      db = (await store.load()) ?? seed()
-      dirty = false
-      const send = res.json.bind(res)
-      res.json = (body) => {
-        if (!dirty) {
-          send(body)
-          release()
-          return res
-        }
-        store
-          .save(db)
-          .then(
-            () => send(body),
-            (err) => {
-              console.error('save failed', err)
-              res.status(500)
-              send({ error: 'Couldn’t save. Please try again.' })
-            },
-          )
-          .finally(release)
-        return res
-      }
-      next()
-    })
-    .catch((err) => {
-      release()
-      next(err)
-    })
+// CSRF: state-changing requests must be JSON. Browsers can't send a
+// cross-site JSON POST with cookies without a CORS preflight we never allow.
+app.use('/api', (req, _res, next) => {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.is('application/json')) return next(new HttpError(415, 'Send JSON.'))
+  next()
+})
+app.use('/api', (_req, res, next) => {
+  res.set('cache-control', 'no-store')
+  ensureSeed().then(() => next(), next)
 })
 
-const bad = (res, status, message) => res.status(status).json({ error: message })
-const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '')
+// ---------- sessions ----------
+const COOKIE = 'ft_session'
+const SESSION_DAYS = 30
+const secureCookies = config.appUrl.startsWith('https://')
 
-function currentUser(req, res) {
-  const id = req.get('x-user-id')
-  const user = id && db.users.find((u) => u.id === id)
-  if (!user) {
-    bad(res, 401, 'Please sign up first.')
-    return null
+function readCookie(req, name) {
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const [k, ...v] = part.trim().split('=')
+    if (k === name) return decodeURIComponent(v.join('='))
   }
+  return null
+}
+function setSessionCookie(res, value, maxAgeSeconds) {
+  res.append('set-cookie', `${COOKIE}=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secureCookies ? '; Secure' : ''}`)
+}
+
+async function loadUser(req) {
+  if (req.user !== undefined) return req.user
+  const token = readCookie(req, COOKIE)
+  req.user = token
+    ? await one(
+        `SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.id_hash = $1 AND s.expires_at > now()`,
+        [sha256(token)],
+      )
+    : null
+  return req.user
+}
+async function requireUser(req) {
+  const user = await loadUser(req)
+  if (!user) fail(401, 'Please sign in.')
+  return user
+}
+async function requireAdmin(req) {
+  const user = await requireUser(req)
+  if (!isAdminEmail(user.email)) fail(403, 'Admins only.')
   return user
 }
 
-app.get('/api/coins', (_req, res) => res.json(COINS))
+// ---------- public config ----------
+app.get('/api/config', (_req, res) => res.json({ demoMode: config.demoMode }))
 
-// --- account ---
-app.post('/api/users', (req, res) => {
-  const name = str(req.body?.name, 40)
-  const email = str(req.body?.email, 120).toLowerCase()
-  if (!name) return bad(res, 400, 'Tell us your name.')
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return bad(res, 400, 'That email doesn’t look right.')
-  let user = db.users.find((u) => u.email === email)
-  if (!user) {
-    user = { id: randomUUID(), name, email, balance: 0, wallets: makeWallets(), createdAt: now() }
-    db.users.push(user)
-    save()
-  }
-  res.json(meView(user))
+// ---------- auth: magic links ----------
+app.post('/api/auth/request', async (req, res) => {
+  const email = str(req.body?.email, 254).toLowerCase()
+  if (!EMAIL_RE.test(email)) fail(400, 'That email doesn’t look right.')
+  const ip = String(req.headers['x-nf-client-connection-ip'] || req.ip || '').slice(0, 64)
+  const { by_email, by_ip } = await one(
+    `SELECT count(*) FILTER (WHERE email = $1)::int AS by_email, count(*) FILTER (WHERE ip = $2)::int AS by_ip
+     FROM login_tokens WHERE created_at > now() - interval '15 minutes' AND (email = $1 OR ip = $2)`,
+    [email, ip],
+  )
+  if (by_email >= 3 || by_ip >= 10) fail(429, 'Too many sign-in emails. Please wait a few minutes and try again.')
+  const token = newToken()
+  await q(`INSERT INTO login_tokens (token_hash, email, ip, expires_at) VALUES ($1, $2, $3, now() + interval '15 minutes')`, [sha256(token), email, ip])
+  await sendMagicLink(email, `${config.appUrl}/app/verify?token=${encodeURIComponent(token)}`)
+  res.json({ ok: true })
 })
 
-app.get('/api/me', (req, res) => {
-  const user = currentUser(req, res)
-  if (user) res.json(meView(user))
+// The emailed link opens a page that POSTs the token here, so link scanners
+// that only GET the URL can't burn the single-use token.
+app.post('/api/auth/verify', async (req, res) => {
+  const token = str(req.body?.token, 200)
+  if (!token) fail(400, 'Missing sign-in token.')
+  const session = newToken()
+  const user = await tx(async (c) => {
+    const claimed = (
+      await c.query(
+        `UPDATE login_tokens SET used_at = now()
+         WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING email`,
+        [sha256(token)],
+      )
+    ).rows[0]
+    if (!claimed) fail(400, 'This sign-in link has expired or was already used. Request a new one.')
+    const u = (
+      await c.query(
+        `INSERT INTO users (email, demo_wallets) VALUES ($1, $2)
+         ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING *`,
+        [claimed.email, config.demoMode ? demoWallets() : null],
+      )
+    ).rows[0]
+    await c.query(`INSERT INTO sessions (id_hash, user_id, expires_at) VALUES ($1, $2, now() + make_interval(days => $3))`, [sha256(session), u.id, SESSION_DAYS])
+    return u
+  })
+  setSessionCookie(res, session, SESSION_DAYS * 86400)
+  res.json(await meView(user))
 })
 
-// Simulates crypto landing on the user's address. In production this is a
-// chain watcher / custody webhook, and the USD amount is locked at arrival.
-app.post('/api/deposits/simulate', (req, res) => {
-  const user = currentUser(req, res)
-  if (!user) return
-  const coin = str(req.body?.coin, 8)
-  const usd = Number(req.body?.usd)
-  if (!COINS[coin]) return bad(res, 400, 'Unknown coin.')
-  if (!Number.isFinite(usd) || usd < 5 || usd > 5000) return bad(res, 400, 'Pick an amount between $5 and $5,000.')
-  const rate = COINS[coin].usd
-  const amount = +(usd / rate).toFixed(COINS[coin].decimals)
-  const d = {
-    id: randomUUID(),
-    userId: user.id,
-    coin,
-    amount,
-    rate,
-    usdCents: Math.round(amount * rate * 100),
-    status: 'confirming',
-    createdAt: now(),
-  }
-  db.deposits.push(d)
-  save()
-  res.json(meView(user))
+app.post('/api/auth/logout', async (req, res) => {
+  const token = readCookie(req, COOKIE)
+  if (token) await q('DELETE FROM sessions WHERE id_hash = $1', [sha256(token)])
+  setSessionCookie(res, '', 0)
+  res.json({ ok: true })
 })
 
-// --- stores ---
-function storeView(b, { lat, lng } = {}) {
-  const avail = db.inventory.filter((c) => c.brandId === b.id && c.status === 'available')
-  const denoms = [...new Set(avail.map((c) => c.faceValue))].sort((a, z) => a - z)
-  const locations = b.locations
-    .map((l) => {
-      const miles = Math.hypot(l.dLat * 69, l.dLng * 69 * Math.cos(((lat ?? 39.74) * Math.PI) / 180))
-      return { address: l.address, miles: +miles.toFixed(1) }
-    })
-    .sort((a, z) => a.miles - z.miles)
+// ---------- account ----------
+async function settleDemoDeposits(userId) {
+  // Atomic: mark matured deposits complete, write their ledger rows, credit the balance.
+  await q(
+    `WITH done AS (
+       UPDATE deposits SET status = 'complete', completed_at = now()
+       WHERE user_id = $1 AND status = 'confirming' AND created_at < now() - make_interval(secs => $2)
+       RETURNING id, user_id, usd_cents
+     ), led AS (
+       INSERT INTO ledger (user_id, amount_cents, kind, ref)
+       SELECT user_id, usd_cents, 'deposit', id::text FROM done RETURNING amount_cents
+     )
+     UPDATE users SET balance_cents = balance_cents + COALESCE((SELECT sum(amount_cents) FROM led), 0) WHERE id = $1`,
+    [userId, CONFIRM_SECONDS],
+  )
+}
+
+function cardView(c) {
   return {
-    id: b.id,
-    name: b.name,
-    category: b.category,
-    color: b.color,
-    tagline: b.tagline,
-    discount: b.sellDiscount,
-    denominations: denoms.map((v) => ({ faceValue: v, price: priceFor(b, v), inStock: avail.filter((c) => c.faceValue === v).length })),
-    nearest: locations[0]?.miles ?? null,
-    locations,
+    id: c.id,
+    brand: { id: c.brand_id, name: c.brand_name, color: c.brand_color, category: c.brand_category },
+    faceValue: c.face_cents,
+    paid: c.sale_cents,
+    balance: c.balance_cents,
+    last4: c.last4,
+    barcodeFormat: c.barcode_format,
+    hasPin: !!c.pin_enc,
+    hasEgiftUrl: !!c.egift_url_enc,
+    expiresOn: c.expires_on,
+    purchasedAt: c.sold_at,
   }
 }
 
-app.get('/api/stores', (req, res) => {
-  const q = str(req.query.q, 60).toLowerCase()
+async function meView(user) {
+  if (config.demoMode) await settleDemoDeposits(user.id)
+  const [u, deposits, cards] = await Promise.all([
+    one('SELECT * FROM users WHERE id = $1', [user.id]),
+    q('SELECT * FROM deposits WHERE user_id = $1 ORDER BY created_at DESC LIMIT 30', [user.id]),
+    q(
+      `SELECT g.*, b.name AS brand_name, b.color AS brand_color, b.category AS brand_category
+       FROM gift_cards g JOIN brands b ON b.id = g.brand_id
+       WHERE g.sold_to = $1 ORDER BY g.sold_at DESC LIMIT 200`,
+      [user.id],
+    ),
+  ])
+  const histories = cards.rows.length
+    ? (
+        await q(
+          `SELECT card_id, balance_cents, note, created_at FROM card_balance_events
+           WHERE card_id = ANY($1) ORDER BY created_at`,
+          [cards.rows.map((c) => c.id)],
+        )
+      ).rows
+    : []
+  const activity = [
+    ...deposits.rows.map((d) => ({
+      id: d.id,
+      type: 'deposit',
+      status: d.status,
+      at: d.created_at,
+      title: `Added ${d.coin}`,
+      detail: `${Number(d.amount)} ${d.coin}`,
+      cents: Number(d.usd_cents),
+    })),
+    ...cards.rows.map((c) => ({
+      id: c.id,
+      type: 'purchase',
+      status: 'complete',
+      at: c.sold_at,
+      title: `${c.brand_name} gift card`,
+      detail: `$${(c.face_cents / 100).toFixed(0)} card · saved $${((c.face_cents - c.sale_cents) / 100).toFixed(2)}`,
+      cents: -c.sale_cents,
+    })),
+  ]
+    .sort((a, b) => new Date(b.at) - new Date(a.at))
+    .slice(0, 30)
+
+  return {
+    id: u.id,
+    name: u.name,
+    email: u.email,
+    isAdmin: isAdminEmail(u.email),
+    balance: Number(u.balance_cents),
+    pending: deposits.rows
+      .filter((d) => d.status === 'confirming')
+      .map((d) => ({ id: d.id, coin: d.coin, amount: Number(d.amount), usdCents: Number(d.usd_cents), createdAt: d.created_at, confirmMs: CONFIRM_SECONDS * 1000 })),
+    wallets: u.demo_wallets ? Object.entries(u.demo_wallets).map(([coin, address]) => ({ coin, address, ...COINS[coin] })) : [],
+    cards: cards.rows.map((c) => ({
+      ...cardView(c),
+      balanceHistory: histories.filter((h) => h.card_id === c.id).map((h) => ({ at: h.created_at, balance: h.balance_cents, note: h.note })),
+    })),
+    saved: cards.rows.reduce((s, c) => s + (c.face_cents - c.sale_cents), 0),
+    activity,
+  }
+}
+
+app.get('/api/me', async (req, res) => {
+  res.json(await meView(await requireUser(req)))
+})
+
+app.post('/api/me', async (req, res) => {
+  const user = await requireUser(req)
+  const name = str(req.body?.name, 40)
+  if (!name) fail(400, 'Tell us your name.')
+  await q('UPDATE users SET name = $2 WHERE id = $1', [user.id, name])
+  res.json(await meView(user))
+})
+
+// Simulated deposits (DEMO_MODE only). Real deposits will arrive via chain webhooks.
+app.post('/api/deposits/simulate', async (req, res) => {
+  if (!config.demoMode) fail(404, 'Not found.')
+  const user = await requireUser(req)
+  const coin = str(req.body?.coin, 8)
+  const usd = Number(req.body?.usd)
+  if (!COINS[coin]) fail(400, 'Unknown coin.')
+  if (!Number.isFinite(usd) || usd < 5 || usd > 5000) fail(400, 'Pick an amount between $5 and $5,000.')
+  const { usd: rate, decimals, network } = COINS[coin]
+  const amount = +(usd / rate).toFixed(decimals)
+  await q(
+    `INSERT INTO deposits (user_id, coin, network, amount, rate_usd, usd_cents, tx_ref)
+     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [user.id, coin, network, amount, rate, Math.round(amount * rate * 100), `demo-${newToken()}`],
+  )
+  res.json(await meView(user))
+})
+
+// ---------- stores ----------
+app.get('/api/stores', async (req, res) => {
+  const qs = str(req.query.q, 60).toLowerCase().replace(/[%_\\]/g, '')
   const category = str(req.query.category, 40)
-  const lat = req.query.lat ? Number(req.query.lat) : undefined
-  let list = db.brands.filter((b) => b.active)
-  if (category) list = list.filter((b) => b.category === category)
-  if (q) list = list.filter((b) => (b.name + ' ' + b.category + ' ' + b.tagline).toLowerCase().includes(q))
-  const stores = list.map((b) => storeView(b, { lat })).sort((a, z) => (a.nearest ?? 99) - (z.nearest ?? 99))
-  const categories = [...new Set(db.brands.filter((b) => b.active).map((b) => b.category))].sort()
+  const lat = Number(req.query.lat)
+  const { rows } = await q(
+    `SELECT b.*, s.face_cents, s.n
+     FROM brands b
+     LEFT JOIN (
+       SELECT brand_id, face_cents, count(*)::int AS n FROM gift_cards
+       WHERE status = 'available' AND (expires_on IS NULL OR expires_on > current_date)
+       GROUP BY brand_id, face_cents
+     ) s ON s.brand_id = b.id
+     WHERE b.active
+       AND ($1 = '' OR b.category = $1)
+       AND ($2 = '' OR lower(b.name || ' ' || b.category || ' ' || b.tagline) LIKE '%' || $2 || '%')
+     ORDER BY b.name, s.face_cents`,
+    [category, qs],
+  )
+  const byBrand = new Map()
+  for (const r of rows) {
+    if (!byBrand.has(r.id)) {
+      // Store locations are demo data; production shows none until real ones exist.
+      const locations = config.demoMode
+        ? r.locations
+            .map((l) => ({
+              address: l.address,
+              miles: +Math.hypot(l.dLat * 69, l.dLng * 69 * Math.cos(((Number.isFinite(lat) ? lat : 39.74) * Math.PI) / 180)).toFixed(1),
+            }))
+            .sort((a, z) => a.miles - z.miles)
+        : []
+      byBrand.set(r.id, {
+        id: r.id,
+        name: r.name,
+        category: r.category,
+        color: r.color,
+        tagline: r.tagline,
+        discount: Number(r.sell_discount),
+        denominations: [],
+        nearest: locations[0]?.miles ?? null,
+        locations,
+      })
+    }
+    if (r.face_cents) byBrand.get(r.id).denominations.push({ faceValue: r.face_cents, price: priceFor(r.sell_discount, r.face_cents), inStock: r.n })
+  }
+  const stores = [...byBrand.values()]
+  if (config.demoMode) stores.sort((a, z) => (a.nearest ?? 99) - (z.nearest ?? 99))
+  const categories = (await q('SELECT DISTINCT category FROM brands WHERE active ORDER BY category')).rows.map((r) => r.category)
   res.json({ stores, categories })
 })
 
-app.post('/api/purchase', (req, res) => {
-  const user = currentUser(req, res)
-  if (!user) return
-  settleDeposits(user)
-  const brand = brandById(str(req.body?.storeId, 60))
+app.post('/api/purchase', async (req, res) => {
+  const user = await requireUser(req)
+  if (config.demoMode) await settleDemoDeposits(user.id)
+  const storeId = str(req.body?.storeId, 60)
   const faceValue = Number(req.body?.faceValue)
-  if (!brand || !brand.active) return bad(res, 404, 'Store not found.')
-  const card = db.inventory.find((c) => c.brandId === brand.id && c.faceValue === faceValue && c.status === 'available')
-  if (!card) return bad(res, 409, 'That card just sold out. Try another amount.')
-  const price = priceFor(brand, faceValue)
-  if (user.balance < price) return bad(res, 402, 'Not enough in your wallet yet.')
-  // Single-threaded + synchronous: the claim and the debit happen together.
-  user.balance -= price
-  Object.assign(card, {
-    status: 'sold',
-    soldTo: user.id,
-    soldAt: now(),
-    salePrice: price,
-    balance: faceValue,
-    balanceHistory: [{ at: now(), balance: faceValue, note: 'Purchased' }],
+  if (!Number.isInteger(faceValue)) fail(400, 'Pick an amount.')
+  const card = await tx(async (c) => {
+    const brand = (await c.query('SELECT * FROM brands WHERE id = $1 AND active FOR SHARE', [storeId])).rows[0]
+    if (!brand) fail(404, 'Store not found.')
+    const price = priceFor(brand.sell_discount, faceValue)
+    // Claim one card; SKIP LOCKED lets parallel buyers take different cards.
+    const picked = (
+      await c.query(
+        `SELECT id FROM gift_cards
+         WHERE brand_id = $1 AND face_cents = $2 AND status = 'available'
+           AND (expires_on IS NULL OR expires_on > current_date)
+         ORDER BY expires_on NULLS LAST, added_at LIMIT 1 FOR UPDATE SKIP LOCKED`,
+        [brand.id, faceValue],
+      )
+    ).rows[0]
+    if (!picked) fail(409, 'That card just sold out. Try another amount.')
+    // Guarded debit: never goes below zero, even with concurrent purchases.
+    const debited = await c.query('UPDATE users SET balance_cents = balance_cents - $2 WHERE id = $1 AND balance_cents >= $2', [user.id, price])
+    if (!debited.rowCount) fail(402, 'Not enough in your wallet yet.')
+    const sold = (
+      await c.query(
+        `UPDATE gift_cards SET status = 'sold', sold_to = $2, sold_at = now(), sale_cents = $3, balance_cents = face_cents
+         WHERE id = $1 RETURNING *`,
+        [picked.id, user.id, price],
+      )
+    ).rows[0]
+    await c.query('INSERT INTO ledger (user_id, amount_cents, kind, ref) VALUES ($1, $2, $3, $4)', [user.id, -price, 'purchase', sold.id])
+    await c.query(`INSERT INTO card_balance_events (card_id, balance_cents, note) VALUES ($1, $2, 'Purchased')`, [sold.id, sold.face_cents])
+    return { ...sold, brand_name: brand.name, brand_color: brand.color, brand_category: brand.category }
   })
-  save()
-  res.json({ card: publicCard(card), me: meView(user) })
+  res.json({ card: cardView(card), me: await meView(user) })
 })
 
-app.post('/api/cards/:id/balance', (req, res) => {
-  const user = currentUser(req, res)
-  if (!user) return
-  const card = db.inventory.find((c) => c.id === req.params.id && c.soldTo === user.id)
-  if (!card) return bad(res, 404, 'Card not found.')
+// ---------- owned cards ----------
+// Secrets only leave the server one card at a time, to its owner.
+app.get('/api/cards/:id/secret', async (req, res) => {
+  const user = await requireUser(req)
+  const c = await one('SELECT number_enc, pin_enc, egift_url_enc, barcode_format FROM gift_cards WHERE id = $1 AND sold_to = $2', [str(req.params.id, 40), user.id])
+  if (!c) fail(404, 'Card not found.')
+  res.json({ number: decrypt(c.number_enc), pin: decrypt(c.pin_enc), egiftUrl: decrypt(c.egift_url_enc), barcodeFormat: c.barcode_format })
+})
+
+app.post('/api/cards/:id/balance', async (req, res) => {
+  const user = await requireUser(req)
+  const id = str(req.params.id, 40)
   const cents = Math.round(Number(req.body?.balance) * 100)
-  if (!Number.isFinite(cents) || cents < 0 || cents > card.faceValue) {
-    return bad(res, 400, `Enter an amount from $0 to $${(card.faceValue / 100).toFixed(2)}.`)
-  }
-  card.balance = cents
-  card.balanceHistory = [...(card.balanceHistory || []), { at: now(), balance: cents, note: 'Updated by you' }].slice(-50)
-  card.archived = cents === 0
-  save()
-  res.json(meView(user))
+  await tx(async (c) => {
+    const card = (await c.query('SELECT face_cents FROM gift_cards WHERE id = $1 AND sold_to = $2 FOR UPDATE', [id, user.id])).rows[0]
+    if (!card) fail(404, 'Card not found.')
+    if (!Number.isFinite(cents) || cents < 0 || cents > card.face_cents) fail(400, `Enter an amount from $0 to $${(card.face_cents / 100).toFixed(2)}.`)
+    await c.query('UPDATE gift_cards SET balance_cents = $2 WHERE id = $1', [id, cents])
+    await c.query(`INSERT INTO card_balance_events (card_id, balance_cents, note) VALUES ($1, $2, 'Updated by you')`, [id, cents])
+  })
+  res.json(await meView(user))
 })
 
-// --- admin (no auth in the demo) ---
-function adminInventoryRow(c) {
-  const b = brandById(c.brandId)
-  const user = c.soldTo && db.users.find((u) => u.id === c.soldTo)
-  return {
-    ...c,
-    brandName: b?.name,
-    brandColor: b?.color,
-    listPrice: b ? priceFor(b, c.faceValue) : null,
-    soldToName: user ? `${user.name} (${user.email})` : null,
-  }
-}
+// ---------- admin (every route below requires an ADMIN_EMAILS account) ----------
+app.use('/api/admin', (req, _res, next) => {
+  requireAdmin(req).then((admin) => {
+    req.admin = admin
+    next()
+  }, next)
+})
 
-app.get('/api/admin/overview', (_req, res) => {
-  const sold = db.inventory.filter((c) => c.status === 'sold')
-  const avail = db.inventory.filter((c) => c.status === 'available')
-  const revenue = sold.reduce((s, c) => s + c.salePrice, 0)
-  const costSold = sold.reduce((s, c) => s + c.cost, 0)
-  const lowStock = db.brands
-    .filter((b) => b.active)
-    .map((b) => ({ id: b.id, name: b.name, color: b.color, count: avail.filter((c) => c.brandId === b.id).length }))
-    .filter((b) => b.count < 6)
-    .sort((a, z) => a.count - z.count)
+app.get('/api/admin/overview', async (_req, res) => {
+  const [inv, sales, customers, deposits, low, recent] = await Promise.all([
+    one(`SELECT count(*)::int AS count, COALESCE(sum(face_cents),0)::bigint AS face, COALESCE(sum(cost_cents),0)::bigint AS cost FROM gift_cards WHERE status = 'available'`),
+    one(`SELECT count(*)::int AS count, COALESCE(sum(sale_cents),0)::bigint AS revenue, COALESCE(sum(cost_cents),0)::bigint AS cost, COALESCE(sum(face_cents),0)::bigint AS face FROM gift_cards WHERE status = 'sold'`),
+    one('SELECT count(*)::int AS count, COALESCE(sum(balance_cents),0)::bigint AS balances FROM users'),
+    one(`SELECT count(*)::int AS count, COALESCE(sum(usd_cents) FILTER (WHERE status = 'complete'),0)::bigint AS usd FROM deposits`),
+    q(`SELECT b.id, b.name, b.color, count(g.id)::int AS count FROM brands b
+       LEFT JOIN gift_cards g ON g.brand_id = b.id AND g.status = 'available'
+       WHERE b.active GROUP BY b.id HAVING count(g.id) < 6 ORDER BY count(g.id), b.name`),
+    q(`SELECT g.id, g.face_cents, g.cost_cents, g.sale_cents, g.sold_at, b.name AS brand_name, b.color AS brand_color, u.email, u.name
+       FROM gift_cards g JOIN brands b ON b.id = g.brand_id JOIN users u ON u.id = g.sold_to
+       WHERE g.status = 'sold' ORDER BY g.sold_at DESC LIMIT 8`),
+  ])
+  const n = Number
   res.json({
-    inventory: { count: avail.length, faceValue: avail.reduce((s, c) => s + c.faceValue, 0), cost: avail.reduce((s, c) => s + c.cost, 0) },
-    sales: { count: sold.length, revenue, cost: costSold, profit: revenue - costSold, faceValue: sold.reduce((s, c) => s + c.faceValue, 0) },
-    customers: { count: db.users.length, balances: db.users.reduce((s, u) => s + u.balance, 0) },
-    deposits: { count: db.deposits.length, usd: db.deposits.filter((d) => d.status === 'complete').reduce((s, d) => s + d.usdCents, 0) },
-    lowStock,
-    recentSales: sold
-      .sort((a, z) => (a.soldAt < z.soldAt ? 1 : -1))
-      .slice(0, 8)
-      .map(adminInventoryRow),
+    inventory: { count: inv.count, faceValue: n(inv.face), cost: n(inv.cost) },
+    sales: { count: sales.count, revenue: n(sales.revenue), cost: n(sales.cost), profit: n(sales.revenue) - n(sales.cost), faceValue: n(sales.face) },
+    customers: { count: customers.count, balances: n(customers.balances) },
+    deposits: { count: deposits.count, usd: n(deposits.usd) },
+    lowStock: low.rows,
+    recentSales: recent.rows.map((r) => ({
+      id: r.id,
+      brandName: r.brand_name,
+      brandColor: r.brand_color,
+      faceValue: r.face_cents,
+      cost: r.cost_cents,
+      salePrice: r.sale_cents,
+      soldAt: r.sold_at,
+      soldToName: `${r.name || 'No name'} (${r.email})`,
+    })),
   })
 })
 
-app.get('/api/admin/inventory', (req, res) => {
+// Inventory list never includes card numbers, PINs or links — only last 4.
+app.get('/api/admin/inventory', async (req, res) => {
   const status = str(req.query.status, 20)
   const brandId = str(req.query.brandId, 60)
-  let rows = db.inventory
-  if (status) rows = rows.filter((c) => c.status === status)
-  if (brandId) rows = rows.filter((c) => c.brandId === brandId)
-  rows = [...rows].sort((a, z) => (a.addedAt < z.addedAt ? 1 : -1)).slice(0, 500)
-  res.json(rows.map(adminInventoryRow))
+  const { rows } = await q(
+    `SELECT g.id, g.face_cents, g.cost_cents, g.sale_cents, g.last4, g.barcode_format, g.expires_on,
+            g.status, g.added_at, g.sold_at, b.name AS brand_name, b.color AS brand_color, b.sell_discount, u.email AS sold_to_email
+     FROM gift_cards g JOIN brands b ON b.id = g.brand_id LEFT JOIN users u ON u.id = g.sold_to
+     WHERE ($1 = '' OR g.status = $1) AND ($2 = '' OR g.brand_id = $2) AND ($1 <> '' OR g.status <> 'void')
+     ORDER BY g.added_at DESC LIMIT 500`,
+    [status, brandId],
+  )
+  res.json(
+    rows.map((r) => ({
+      id: r.id,
+      brandName: r.brand_name,
+      brandColor: r.brand_color,
+      faceValue: r.face_cents,
+      cost: r.cost_cents,
+      salePrice: r.sale_cents,
+      listPrice: priceFor(r.sell_discount, r.face_cents),
+      last4: r.last4,
+      barcodeFormat: r.barcode_format,
+      expiresOn: r.expires_on,
+      status: r.status,
+      addedAt: r.added_at,
+      soldAt: r.sold_at,
+      soldToName: r.sold_to_email,
+    })),
+  )
 })
 
-// Add one or many cards: lines of "cardNumber, pin". Leave lines empty to
-// generate demo numbers.
-app.post('/api/admin/inventory', (req, res) => {
-  const brand = brandById(str(req.body?.brandId, 60))
-  const faceValue = Math.round(Number(req.body?.faceValue) * 100)
+const FORMATS = ['CODE128', 'CODE39', 'EAN13', 'UPC', 'QR', 'NONE']
+// Add a batch of real cards. One line per card: number, PIN, e-gift URL
+// (PIN and URL optional). All-or-nothing: a duplicate aborts the batch.
+app.post('/api/admin/inventory', async (req, res) => {
+  const brandId = str(req.body?.brandId, 60)
+  const face = Math.round(Number(req.body?.faceValue) * 100)
   const cost = Math.round(Number(req.body?.cost) * 100)
-  if (!brand) return bad(res, 400, 'Choose a brand.')
-  if (!Number.isFinite(faceValue) || faceValue < 100 || faceValue > 100000) return bad(res, 400, 'Face value must be $1–$1,000.')
-  if (!Number.isFinite(cost) || cost <= 0 || cost > faceValue) return bad(res, 400, 'Cost must be above $0 and no more than face value.')
-  let lines = str(req.body?.cards, 20000)
+  const format = FORMATS.includes(req.body?.barcodeFormat) ? req.body.barcodeFormat : 'CODE128'
+  const expiresOn = str(req.body?.expiresOn, 10) || null
+  if (expiresOn && !/^\d{4}-\d{2}-\d{2}$/.test(expiresOn)) fail(400, 'Expiry must be a date.')
+  if (!Number.isFinite(face) || face < 100 || face > 100000) fail(400, 'Face value must be $1–$1,000.')
+  if (!Number.isFinite(cost) || cost <= 0 || cost > face) fail(400, 'Cost must be above $0 and no more than face value.')
+  let lines = str(req.body?.cards, 40000)
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
-  const generate = Math.min(Math.max(Number(req.body?.generate) || 0, 0), 50)
-  if (!lines.length && generate) lines = Array.from({ length: generate }, () => `${makeCardNumber()}, ${makePin()}`)
-  if (!lines.length) return bad(res, 400, 'Add at least one card.')
-  if (lines.length > 200) return bad(res, 400, 'Up to 200 cards at a time.')
-  const added = []
-  for (const line of lines) {
-    const [num, pin = ''] = line.split(/[,\t;]/).map((s) => s.trim())
-    if (!/^[0-9A-Za-z-]{6,30}$/.test(num || '')) return bad(res, 400, `Card number looks wrong: “${line.slice(0, 40)}”`)
-    if (db.inventory.some((c) => c.brandId === brand.id && c.cardNumber === num)) return bad(res, 409, `Already in inventory: ${num}`)
-    added.push({
-      id: randomUUID(),
-      brandId: brand.id,
-      faceValue,
-      cost,
-      cardNumber: num,
-      pin: pin.slice(0, 12),
-      status: 'available',
-      addedAt: now(),
-    })
-  }
-  db.inventory.push(...added)
-  save()
-  res.json({ added: added.length })
+  if (!lines.length && config.demoMode && req.body?.generate) lines = [`${makeCardNumber()}, ${makePin()}`]
+  if (!lines.length) fail(400, 'Add at least one card.')
+  if (lines.length > 200) fail(400, 'Up to 200 cards at a time.')
+
+  const parsed = lines.map((line) => {
+    const [num = '', pin = '', url = ''] = line.split(/\s*[,\t;]\s*/)
+    const number = num.replace(/\s+/g, '')
+    if (!/^[0-9A-Za-z-]{6,40}$/.test(number)) fail(400, `Card number looks wrong: “${line.slice(0, 40)}”`)
+    if (pin && !/^[0-9A-Za-z-]{1,16}$/.test(pin)) fail(400, `PIN looks wrong on: “${line.slice(0, 40)}”`)
+    if (url && !/^https:\/\/\S{4,500}$/.test(url)) fail(400, `E-gift links must start with https:// (“${line.slice(0, 40)}”)`)
+    return { number, pin, url }
+  })
+  const added = await tx(async (c) => {
+    const brand = (await c.query('SELECT id FROM brands WHERE id = $1', [brandId])).rows[0]
+    if (!brand) fail(400, 'Choose a brand.')
+    for (const p of parsed) {
+      const r = await c.query(
+        `INSERT INTO gift_cards (brand_id, face_cents, cost_cents, number_enc, number_hash, last4, pin_enc, egift_url_enc, barcode_format, expires_on, added_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (brand_id, number_hash) DO NOTHING`,
+        [brandId, face, cost, encrypt(p.number), cardNumberHash(p.number), p.number.slice(-4), encrypt(p.pin), encrypt(p.url), format, expiresOn, req.admin.email],
+      )
+      if (!r.rowCount) fail(409, `Already in inventory: card ending ${p.number.slice(-4)}. Nothing was added.`)
+    }
+    await audit(c, req.admin.email, 'inventory.add', { brandId, face, cost, count: parsed.length })
+    return parsed.length
+  })
+  res.json({ added })
 })
 
-app.delete('/api/admin/inventory/:id', (req, res) => {
-  const i = db.inventory.findIndex((c) => c.id === req.params.id)
-  if (i < 0) return bad(res, 404, 'Not found.')
-  if (db.inventory[i].status !== 'available') return bad(res, 409, 'Sold cards can’t be removed.')
-  db.inventory.splice(i, 1)
-  save()
+app.delete('/api/admin/inventory/:id', async (req, res) => {
+  await tx(async (c) => {
+    const r = await c.query(`UPDATE gift_cards SET status = 'void' WHERE id = $1 AND status = 'available' RETURNING id, last4`, [str(req.params.id, 40)])
+    if (!r.rowCount) fail(409, 'Only unsold cards can be removed.')
+    await audit(c, req.admin.email, 'inventory.void', { id: r.rows[0].id, last4: r.rows[0].last4 })
+  })
   res.json({ ok: true })
 })
 
-app.get('/api/admin/brands', (_req, res) => {
+app.get('/api/admin/brands', async (_req, res) => {
+  const { rows } = await q(
+    `SELECT b.*, count(g.id) FILTER (WHERE g.status = 'available')::int AS available,
+            count(g.id) FILTER (WHERE g.status = 'sold')::int AS sold
+     FROM brands b LEFT JOIN gift_cards g ON g.brand_id = b.id GROUP BY b.id ORDER BY b.name`,
+  )
   res.json(
-    db.brands.map((b) => {
-      const mine = db.inventory.filter((c) => c.brandId === b.id)
-      return {
-        ...b,
-        available: mine.filter((c) => c.status === 'available').length,
-        sold: mine.filter((c) => c.status === 'sold').length,
-      }
-    }),
+    rows.map((b) => ({
+      id: b.id,
+      name: b.name,
+      category: b.category,
+      color: b.color,
+      tagline: b.tagline,
+      active: b.active,
+      buyDiscount: Number(b.buy_discount),
+      sellDiscount: Number(b.sell_discount),
+      available: b.available,
+      sold: b.sold,
+    })),
   )
 })
 
-app.post('/api/admin/brands', (req, res) => {
+app.post('/api/admin/brands', async (req, res) => {
   const name = str(req.body?.name, 60)
-  if (!name) return bad(res, 400, 'Name is required.')
+  if (!name) fail(400, 'Name is required.')
   const id = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')
-  if (brandById(id)) return bad(res, 409, 'That brand already exists.')
-  const brand = {
-    id,
-    name,
-    category: str(req.body?.category, 40) || 'Restaurants',
-    color: /^#[0-9a-fA-F]{6}$/.test(req.body?.color) ? req.body.color : '#111111',
-    tagline: str(req.body?.tagline, 80),
-    buyDiscount: 0.2,
-    sellDiscount: 0.15,
-    active: true,
-    locations: [{ address: 'Main St', dLat: 0.02, dLng: -0.03 }],
-  }
-  db.brands.push(brand)
-  save()
-  res.json(brand)
+  if (!id) fail(400, 'Use letters or numbers in the name.')
+  const color = /^#[0-9a-fA-F]{6}$/.test(req.body?.color) ? req.body.color : '#111111'
+  await tx(async (c) => {
+    const r = await c.query(`INSERT INTO brands (id, name, category, color, tagline) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (id) DO NOTHING`, [
+      id,
+      name,
+      str(req.body?.category, 40) || 'Restaurants',
+      color,
+      str(req.body?.tagline, 80),
+    ])
+    if (!r.rowCount) fail(409, 'That brand already exists.')
+    await audit(c, req.admin.email, 'brand.create', { id })
+  })
+  res.json({ id })
 })
 
-app.put('/api/admin/brands/:id', (req, res) => {
-  const b = brandById(req.params.id)
-  if (!b) return bad(res, 404, 'Not found.')
+app.put('/api/admin/brands/:id', async (req, res) => {
   const pct = (v) => (Number.isFinite(Number(v)) && Number(v) >= 0 && Number(v) < 90 ? Number(v) / 100 : null)
-  const buy = req.body?.buyDiscount !== undefined ? pct(req.body.buyDiscount) : b.buyDiscount
-  const sell = req.body?.sellDiscount !== undefined ? pct(req.body.sellDiscount) : b.sellDiscount
-  if (buy === null || sell === null) return bad(res, 400, 'Discounts must be 0–90%.')
-  if (sell > buy) return bad(res, 400, 'Customer discount can’t be bigger than what we buy at — we’d lose money.')
-  b.buyDiscount = buy
-  b.sellDiscount = sell
-  if (typeof req.body?.active === 'boolean') b.active = req.body.active
-  save()
-  res.json(b)
-})
-
-app.get('/api/admin/customers', (_req, res) => {
-  res.json(
-    db.users.map((u) => {
-      settleDeposits(u)
-      const cards = db.inventory.filter((c) => c.soldTo === u.id)
-      return {
-        id: u.id,
-        name: u.name,
-        email: u.email,
-        balance: u.balance,
-        createdAt: u.createdAt,
-        cards: cards.length,
-        spent: cards.reduce((s, c) => s + c.salePrice, 0),
-        deposited: db.deposits.filter((d) => d.userId === u.id && d.status === 'complete').reduce((s, d) => s + d.usdCents, 0),
-      }
-    }),
-  )
-})
-
-app.post('/api/admin/reset', (_req, res) => {
-  db = seed()
-  save()
+  await tx(async (c) => {
+    const b = (await c.query('SELECT * FROM brands WHERE id = $1 FOR UPDATE', [str(req.params.id, 60)])).rows[0]
+    if (!b) fail(404, 'Not found.')
+    const buy = req.body?.buyDiscount !== undefined ? pct(req.body.buyDiscount) : Number(b.buy_discount)
+    const sell = req.body?.sellDiscount !== undefined ? pct(req.body.sellDiscount) : Number(b.sell_discount)
+    if (buy === null || sell === null) fail(400, 'Discounts must be 0–90%.')
+    if (sell > buy) fail(400, 'Customer discount can’t be bigger than what we buy at — we’d lose money.')
+    const active = typeof req.body?.active === 'boolean' ? req.body.active : b.active
+    await c.query('UPDATE brands SET buy_discount = $2, sell_discount = $3, active = $4 WHERE id = $1', [b.id, buy, sell, active])
+    await audit(c, req.admin.email, 'brand.update', { id: b.id, buy, sell, active })
+  })
   res.json({ ok: true })
 })
 
-// Never send stack traces to the browser.
-app.use('/api', (_req, res) => res.status(404).json({ error: 'Not found.' }))
-app.use((err, _req, res, _next) => {
-  console.error(err)
-  res.status(err.status && err.status < 500 ? err.status : 500).json({ error: err.status === 400 ? 'Bad request.' : 'Something went wrong. Please try again.' })
+app.get('/api/admin/customers', async (_req, res) => {
+  const { rows } = await q(
+    `SELECT u.id, u.name, u.email, u.balance_cents, u.created_at,
+            (SELECT count(*)::int FROM gift_cards g WHERE g.sold_to = u.id) AS cards,
+            (SELECT COALESCE(sum(sale_cents),0)::bigint FROM gift_cards g WHERE g.sold_to = u.id) AS spent,
+            (SELECT COALESCE(sum(usd_cents),0)::bigint FROM deposits d WHERE d.user_id = u.id AND d.status = 'complete') AS deposited
+     FROM users u ORDER BY u.created_at DESC LIMIT 500`,
+  )
+  res.json(
+    rows.map((u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      balance: Number(u.balance_cents),
+      createdAt: u.created_at,
+      cards: u.cards,
+      spent: Number(u.spent),
+      deposited: Number(u.deposited),
+    })),
+  )
 })
 
-export function createApp(options) {
-  store = options.store
+// Demo only: wipe sales, deposits and inventory (keeps accounts).
+app.post('/api/admin/reset', async (req, res) => {
+  if (!config.demoMode) fail(404, 'Not found.')
+  await tx(async (c) => {
+    await c.query('TRUNCATE card_balance_events, ledger, deposits, gift_cards')
+    await c.query('UPDATE users SET balance_cents = 0')
+    const brands = (await c.query('SELECT * FROM brands')).rows.map((b) => ({ ...b, buyDiscount: Number(b.buy_discount) }))
+    await insertDemoInventory(c, brands)
+    await audit(c, req.admin.email, 'demo.reset')
+  })
+  res.json({ ok: true })
+})
+
+// ---------- errors ----------
+app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found.')))
+// Never send stack traces or internal messages to the browser.
+app.use((err, _req, res, _next) => {
+  if (err instanceof HttpError || err.expose) {
+    if ((err.status ?? 500) >= 500) console.error(err)
+    const message = err.type === 'entity.parse.failed' ? 'Bad request.' : err.type === 'entity.too.large' ? 'Request too large.' : err.message
+    return res.status(err.status ?? 500).json({ error: message })
+  }
+  console.error(err)
+  res.status(500).json({ error: 'Something went wrong. Please try again.' })
+})
+
+export function createApp() {
   return app
 }

@@ -101,7 +101,7 @@ export default function WalletPage() {
                       <span className="flex items-center gap-3">
                         <span className="size-3 rounded-full" style={{ background: c.brand.color }} />
                         <span className="font-semibold">{c.brand.name}</span>
-                        <span className="text-muted">•••• {c.cardNumber.slice(-4)}</span>
+                        <span className="text-muted">•••• {c.last4}</span>
                       </span>
                       <span className="text-muted">Used up</span>
                     </button>

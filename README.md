@@ -1,62 +1,61 @@
-# Food Token — interface demo
+# Food Token
 
-Spend crypto on food. Customers send crypto to their own deposit address, it's
-converted to dollars on arrival, and they buy discounted restaurant gift cards
-that live in an Apple Wallet–style card stack.
+Spend crypto on food. Customers send crypto to their own deposit address,
+it's converted to dollars on arrival, and they buy discounted restaurant gift
+cards that live in an Apple Wallet–style card stack.
+
+## Run it locally
 
 ```bash
 npm install
-npm run dev        # web on http://localhost:5180, API on :5181
+npm run db:up        # Postgres in Docker on :5440
+cp .env.example .env # then fill in CARD_ENCRYPTION_KEY (openssl rand -base64 32)
+npm run migrate
+npm run dev          # web on http://localhost:5180, API on :5181
 ```
+
+Without `RESEND_API_KEY`, sign-in links are printed in the API console.
 
 | URL | What |
 | --- | --- |
 | `/` | Marketing page |
-| `/app` | Customer app: onboarding → wallet → add crypto → stores → buy → show barcode → update balance |
-| `/admin` | Inventory (add cards in batches), brand margins, customers, overview |
+| `/app` | Customer app: email sign-in → wallet → add crypto → stores → buy → barcode → update balance |
+| `/admin` | Inventory, brand margins, customers, overview — only for `ADMIN_EMAILS` |
 
-## How the money works (demo defaults)
+## Environment variables
 
-Each brand has two numbers, editable in **Admin → Brands & margins**:
+| Variable | Required | What |
+| --- | --- | --- |
+| `NETLIFY_DATABASE_URL` / `DATABASE_URL` | yes | Postgres. Netlify DB sets the first automatically. |
+| `APP_URL` | yes | Public site URL, used in sign-in emails (e.g. `https://bryans-food-token.netlify.app`). |
+| `ADMIN_EMAILS` | yes | Comma-separated emails allowed into `/admin`. |
+| `RESEND_API_KEY` | prod | Resend API key. |
+| `EMAIL_FROM` | prod | Sender on a domain verified in Resend, e.g. `Food Token <signin@yourdomain.com>`. |
+| `CARD_ENCRYPTION_KEY` | yes | 32 random bytes, base64. Encrypts card numbers, PINs and e-gift links. **Back it up** — losing it makes stored cards unreadable. |
+| `DEMO_MODE` | no | `true` = simulated deposits, fake addresses, demo inventory, demo banner. |
 
-- **We buy at** 20% off face value (our cost)
-- **Customer saves** 15% off face value (their price)
+## How it's built
 
-The gap (5% of face) is the margin. A $50 card costs us $40, sells for $42.50.
+- **API**: Express (`server/app.js`) on Postgres (`server/db.js`). Locally via
+  `server/dev.js`; on Netlify as a Functions v2 function on `/api/*`
+  (`netlify/functions/api.mjs`).
+- **Migrations**: `db/migrations/*.sql`, applied by `npm run migrate`, which
+  the Netlify build runs before building.
+- **Money**: integer cents. Every balance change writes a `ledger` row in the
+  same transaction; `(kind, ref)` is unique so nothing applies twice.
+  Purchases claim a card with `FOR UPDATE SKIP LOCKED` and debit with a
+  guarded `UPDATE … WHERE balance_cents >= price`.
+- **Sign-in**: magic links via Resend. Tokens are stored hashed, expire in
+  15 minutes and are claimed once. Sessions are an HttpOnly cookie (30 days).
+  Max 3 emails per address and 10 per IP per 15 minutes.
+- **Admin**: every `/api/admin/*` route checks the signed-in email against
+  `ADMIN_EMAILS`; the UI only shows the Admin link to those accounts.
+- **Gift cards**: number, PIN and e-gift link are AES-256-GCM encrypted.
+  Admin lists show only the last 4 digits; the full card is fetched one at a
+  time, only by its owner, when they open it. Admin actions go to `audit_log`.
 
-## What's simulated
+## Not built yet
 
-- **Deposit addresses** are fake and deliberately invalid (they contain
-  `DEMO` plus characters each format forbids), so no wallet will send to them.
-  A real build needs a custody provider or HD wallet plus a chain watcher.
-- **Deposits** are triggered from the "Demo: pretend you sent" buttons and
-  confirm after ~6 seconds. Crypto rates are fixed in `server/app.js`.
-- **No auth.** The customer is identified by an id in localStorage; the admin
-  is open. Card numbers and PINs are stored in plain JSON.
-- **Store locations** are offsets around wherever the viewer is.
-- Data lives in `server/data/db.json` locally and in a Netlify Blob when
-  deployed. **Admin → Reset demo data** reseeds it.
-
-## Layout
-
-| Path | What |
-| --- | --- |
-| `server/app.js` | The API (Express) |
-| `server/store.js` | Storage: JSON file locally, Netlify Blobs in production |
-| `server/dev.js` | Local API entry (port 5181) |
-| `netlify/functions/api.mjs` | Netlify entry (Functions v2): the same app via `serverless-http` |
-| `src/` | React app: `marketing/`, `app/` (customer), `admin/` |
-
-## Deploying (Netlify)
-
-`netlify.toml` builds the site to `dist/` and falls back to `index.html` for
-client routes. The API is a Functions v2 function mounted on `/api/*` (its
-`config.path`); v2 is needed for strongly consistent Blobs reads.
-
-```bash
-netlify deploy --build --prod
-```
-
-The whole database is one blob, so two testers writing at the same instant
-can overwrite each other. That's fine for a demo; a real build needs a
-database.
+Real deposit addresses and deposit detection, and the scheduled sweep to the
+company treasury wallet. Until then, run with `DEMO_MODE=true`; without it the
+"Add crypto" sheet says deposits open soon.

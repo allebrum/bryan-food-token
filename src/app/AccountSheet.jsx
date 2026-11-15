@@ -18,7 +18,7 @@ export default function AccountSheet({ open, onClose }) {
         </div>
       </div>
 
-      <h3 className="mb-3 mt-8 font-bold">Your deposit addresses</h3>
+      {me.wallets.length > 0 && <h3 className="mb-3 mt-8 font-bold">Your deposit addresses</h3>}
       <ul className="grid gap-2">
         {me.wallets.map((w) => (
           <li key={w.coin} className="flex items-center gap-3 rounded-2xl bg-canvas p-3">
@@ -34,9 +34,11 @@ export default function AccountSheet({ open, onClose }) {
       </ul>
 
       <div className="mt-8 grid gap-2">
-        <Button as={Link} to="/admin" variant="outline" block onClick={onClose}>
-          <Shield className="size-4" /> Open admin (demo)
-        </Button>
+        {me.isAdmin && (
+          <Button as={Link} to="/admin" variant="outline" block onClick={onClose}>
+            <Shield className="size-4" /> Open admin
+          </Button>
+        )}
         <Button variant="danger" block onClick={signOut}>
           <LogOut className="size-4" /> Sign out
         </Button>

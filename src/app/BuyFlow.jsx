@@ -81,6 +81,7 @@ export default function BuyFlow({ store, onClose }) {
               </button>
             ))}
           </div>
+          {store.locations.length > 0 && (
           <div className="mt-6 rounded-2xl bg-canvas p-4">
             <p className="mb-2 text-sm font-bold text-muted">Nearest locations</p>
             <ul className="grid gap-1.5">
@@ -94,6 +95,8 @@ export default function BuyFlow({ store, onClose }) {
               ))}
             </ul>
           </div>
+          )}
+          {store.denominations.length === 0 && <p className="text-lg text-muted">Sold out right now. Check back soon.</p>}
         </>
       )}
 

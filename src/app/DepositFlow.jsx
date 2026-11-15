@@ -46,11 +46,24 @@ export default function DepositFlow({ open, onClose }) {
 
   return (
     <Modal open={open} step={`${step}${depositId ? 'd' : ''}`} onClose={onClose} onBack={step === 1 ? () => setStep(0) : undefined} label="Add crypto">
-      <div className="mb-6">
-        <StepDots step={step} total={3} />
-      </div>
+      {me.wallets.length > 0 && (
+        <div className="mb-6">
+          <StepDots step={step} total={3} />
+        </div>
+      )}
 
-      {step === 0 && (
+      {step === 0 && me.wallets.length === 0 && (
+        <div className="text-center">
+          <SheetTitle title="Crypto deposits open soon">
+            We’re finishing your personal deposit addresses. We’ll email you the moment you can add crypto.
+          </SheetTitle>
+          <Button size="lg" block onClick={onClose} data-autofocus>
+            Got it
+          </Button>
+        </div>
+      )}
+
+      {step === 0 && me.wallets.length > 0 && (
         <>
           <SheetTitle title="Which crypto do you have?">Not sure? Choose USDC — it’s a digital dollar.</SheetTitle>
           <ul className="grid gap-3">

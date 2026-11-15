@@ -33,7 +33,7 @@ export default function GiftCardPass({ card, peek = false, className = '', style
           <span className="flex items-end justify-between">
             <span>
               <span className="block text-[11px] font-bold uppercase tracking-widest opacity-70">Gift card</span>
-              <span className="tabular block font-semibold">{money(card.faceValue, { whole: true })} · •••• {card.cardNumber.slice(-4)}</span>
+              <span className="tabular block font-semibold">{money(card.faceValue, { whole: true })} · •••• {card.last4}</span>
             </span>
             <span className="text-[11px] font-bold uppercase tracking-widest opacity-70">Food Token</span>
           </span>

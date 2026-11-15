@@ -1,15 +1,13 @@
-// Netlify Functions v2 entry. v2 is required for strongly consistent Blobs
-// reads (Lambda-compat functions can't do them). Express still does the
-// routing: the Web Request is turned into the API Gateway–style event that
-// serverless-http understands, and its result back into a Response.
+// Netlify Functions v2 entry. Express does the routing: the Web Request is
+// turned into the API Gateway–style event that serverless-http understands,
+// and its result back into a Response.
 import serverless from 'serverless-http'
 import { createApp } from '../../server/app.js'
-import { blobStore } from '../../server/store.js'
 
 let handle
 
 export default async (req) => {
-  if (!handle) handle = serverless(createApp({ store: await blobStore() }))
+  if (!handle) handle = serverless(createApp())
   const url = new URL(req.url)
   const hasBody = !['GET', 'HEAD'].includes(req.method)
   const out = await handle(

@@ -4,16 +4,17 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web -c magenta,cyan \"node --watch server/dev.js\" \"vite\"",
+    "dev": "concurrently -k -n api,web -c magenta,cyan \"node --env-file=.env --watch server/dev.js\" \"vite\"",
     "dev:web": "vite",
-    "dev:api": "node --watch server/dev.js",
-    "build": "vite build",
-    "reset": "rm -f server/data/db.json"
+    "dev:api": "node --env-file=.env --watch server/dev.js",
+    "db:up": "docker compose up -d",
+    "migrate": "node --env-file-if-exists=.env scripts/migrate.js",
+    "build": "vite build"
   },
   "dependencies": {
-    "@netlify/blobs": "^11.1.9",
     "express": "^5.3.0",
     "lucide-react": "^1.73.0",
+    "pg": "^8.23.1",
     "qrcode.react": "^4.2.0",
     "react": "^19.3.1",
     "react-barcode": "^1.6.1",

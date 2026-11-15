@@ -1,0 +1,15 @@
+# Local Postgres for development. Production uses Netlify DB (Neon).
+services:
+  db:
+    image: postgres:17
+    container_name: foodtoken-pg
+    environment:
+      POSTGRES_USER: foodtoken
+      POSTGRES_PASSWORD: foodtoken
+      POSTGRES_DB: foodtoken
+    ports:
+      - "5440:5432"
+    volumes:
+      - foodtoken-pg:/var/lib/postgresql/data
+volumes:
+  foodtoken-pg:

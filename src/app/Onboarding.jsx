@@ -1,129 +1,88 @@
-import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { ArrowRight, Check, ShieldCheck, Zap, DollarSign } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
+import { ArrowRight, Check, ShieldCheck, Zap, DollarSign, Mail } from 'lucide-react'
 import Logo, { LogoMark } from '../components/Logo'
 import Button from '../components/Button'
 import Stack from '../components/Stack'
-import Modal, { StepDots, SheetTitle } from '../components/Modal'
-import { api, session } from '../lib/api'
+import Modal, { SheetTitle } from '../components/Modal'
+import { api } from '../lib/api'
 import { useAccount } from './AppRoot'
 
-const STEPS = ['name', 'email', 'creating', 'ready']
+const input =
+  'h-16 w-full rounded-2xl border-2 border-line bg-white px-5 text-xl font-semibold outline-none placeholder:font-normal placeholder:text-muted/60 focus:border-ink'
 
+// Signed-out landing: one email field, then "check your inbox".
 export default function Onboarding() {
-  const { setMe, openDeposit } = useAccount()
   const [open, setOpen] = useState(false)
-  const [step, setStep] = useState(0)
-  const [name, setName] = useState('')
+  const [step, setStep] = useState('email')
   const [email, setEmail] = useState('')
   const [error, setError] = useState('')
-  const [created, setCreated] = useState(null)
+  const [busy, setBusy] = useState(false)
 
-  const create = async () => {
+  const send = async () => {
     setError('')
-    setStep(2)
+    setBusy(true)
     try {
-      const [me] = await Promise.all([api('/users', { method: 'POST', body: { name, email } }), new Promise((r) => setTimeout(r, 1400))])
-      session.set(me.id)
-      setCreated(me)
-      setStep(3)
+      await api('/auth/request', { method: 'POST', body: { email } })
+      setStep('sent')
     } catch (e) {
       setError(e.message)
-      setStep(1)
+    } finally {
+      setBusy(false)
     }
   }
 
-  const finish = (thenDeposit) => {
-    setMe(created)
-    if (thenDeposit) setTimeout(openDeposit, 50)
-  }
-
   return (
-    <div className="flex min-h-dvh flex-col bg-white">
-      <header className="mx-auto flex h-20 w-full max-w-6xl items-center px-6 sm:px-10">
-        <Link to="/" aria-label="Food Token home">
-          <Logo />
-        </Link>
-      </header>
-      <main className="mx-auto grid w-full max-w-6xl flex-1 items-center gap-14 px-6 pb-16 sm:px-10 lg:grid-cols-2">
-        <div>
-          <h1 className="text-5xl font-extrabold leading-[1.05] tracking-tight sm:text-7xl">
-            Let’s set up your <span className="text-accent">food wallet.</span>
-          </h1>
-          <p className="mt-6 max-w-lg text-xl leading-relaxed text-muted">
-            It takes about 30 seconds. No crypto knowledge needed — we’ll walk you through each step.
-          </p>
-          <Button size="lg" className="mt-10" onClick={() => setOpen(true)}>
+    <Page>
+      <div>
+        <h1 className="text-5xl font-extrabold leading-[1.05] tracking-tight sm:text-7xl">
+          Let’s set up your <span className="text-accent">food wallet.</span>
+        </h1>
+        <p className="mt-6 max-w-lg text-xl leading-relaxed text-muted">
+          It takes about 30 seconds. No passwords and no crypto knowledge needed — we’ll walk you through each step.
+        </p>
+        <div className="mt-10 flex flex-wrap items-center gap-3">
+          <Button size="lg" onClick={() => setOpen(true)}>
             Get started <ArrowRight className="size-5" />
           </Button>
-          <ul className="mt-12 grid max-w-lg gap-5 text-lg">
-            {[
-              [Zap, 'Your own deposit address, ready instantly'],
-              [DollarSign, 'Crypto becomes dollars the moment it lands'],
-              [ShieldCheck, 'Gift cards live safely in your account'],
-            ].map(([Icon, t]) => (
-              <li key={t} className="flex items-center gap-4">
-                <span className="grid size-11 place-items-center rounded-2xl bg-accent-soft text-accent">
-                  <Icon className="size-5" />
-                </span>
-                {t}
-              </li>
-            ))}
-          </ul>
+          <Button size="lg" variant="ghost" onClick={() => setOpen(true)}>
+            I have an account
+          </Button>
         </div>
-        <WalletPreview />
-      </main>
+        <ul className="mt-12 grid max-w-lg gap-5 text-lg">
+          {[
+            [Zap, 'Your own deposit address, ready instantly'],
+            [DollarSign, 'Crypto becomes dollars the moment it lands'],
+            [ShieldCheck, 'Gift cards live safely in your account'],
+          ].map(([Icon, t]) => (
+            <li key={t} className="flex items-center gap-4">
+              <span className="grid size-11 place-items-center rounded-2xl bg-accent-soft text-accent">
+                <Icon className="size-5" />
+              </span>
+              {t}
+            </li>
+          ))}
+        </ul>
+      </div>
 
       <Modal
-        step={step}
         open={open}
-        onClose={step === 2 ? undefined : () => (step === 3 ? finish(false) : setOpen(false))}
-        onBack={step === 1 ? () => setStep(0) : undefined}
-        label="Create your account"
+        step={step}
+        onClose={() => {
+          setOpen(false)
+          setStep('email')
+        }}
+        onBack={step === 'sent' ? () => setStep('email') : undefined}
+        label="Sign in"
       >
-        {step < 2 && (
-          <div className="mb-6">
-            <StepDots step={step} total={2} />
-          </div>
-        )}
-
-        {STEPS[step] === 'name' && (
+        {step === 'email' ? (
           <form
             onSubmit={(e) => {
               e.preventDefault()
-              if (name.trim()) setStep(1)
+              send()
             }}
           >
-            <SheetTitle title="First, what should we call you?" />
-            <label className="sr-only" htmlFor="ob-name">
-              First name
-            </label>
-            <input
-              id="ob-name"
-              data-autofocus
-              autoComplete="given-name"
-              placeholder="First name"
-              maxLength={40}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              className="h-16 w-full rounded-2xl border-2 border-line bg-white px-5 text-xl font-semibold outline-none placeholder:font-normal placeholder:text-muted/60 focus:border-ink"
-            />
-            <Button type="submit" size="lg" block className="mt-6" disabled={!name.trim()}>
-              Continue
-            </Button>
-          </form>
-        )}
-
-        {STEPS[step] === 'email' && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault()
-              create()
-            }}
-          >
-            <SheetTitle title={`Nice to meet you, ${name.trim()}. What’s your email?`}>
-              We’ll send receipts here, and it’s how you get back into your wallet.
-            </SheetTitle>
+            <SheetTitle title="What’s your email?">We’ll email you a link to sign in — no password to remember.</SheetTitle>
             <label className="sr-only" htmlFor="ob-email">
               Email
             </label>
@@ -134,60 +93,182 @@ export default function Onboarding() {
               autoComplete="email"
               inputMode="email"
               placeholder="you@example.com"
-              maxLength={120}
+              maxLength={254}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="h-16 w-full rounded-2xl border-2 border-line bg-white px-5 text-xl font-semibold outline-none placeholder:font-normal placeholder:text-muted/60 focus:border-ink"
+              className={input}
             />
             {error && (
               <p role="alert" className="mt-3 font-semibold text-red-600">
                 {error}
               </p>
             )}
-            <Button type="submit" size="lg" block className="mt-6" disabled={!email.includes('@')}>
-              Create my wallet
+            <Button type="submit" size="lg" block className="mt-6" disabled={busy || !email.includes('@')}>
+              {busy ? 'Sending…' : 'Email me a link'}
             </Button>
           </form>
-        )}
-
-        {STEPS[step] === 'creating' && <Creating />}
-
-        {STEPS[step] === 'ready' && created && (
+        ) : (
           <div className="text-center">
-            <div className="mx-auto mb-6 grid size-20 animate-pop place-items-center rounded-full bg-save text-white">
-              <Check className="size-10" strokeWidth={3} />
+            <div className="mx-auto mb-6 grid size-20 animate-pop place-items-center rounded-full bg-accent-soft text-accent">
+              <Mail className="size-9" />
             </div>
-            <SheetTitle title="Your wallet is ready">
-              Next, add some crypto. We’ll turn it into dollars you can spend at your favorite places.
+            <SheetTitle title="Check your email">
+              We sent a sign-in link to <b className="text-ink">{email}</b>. Open it on this device. It works once and expires in 15 minutes.
             </SheetTitle>
-            <div className="mb-8 rounded-[var(--radius-pass)] bg-ink p-6 text-left text-white">
-              <p className="text-sm font-semibold uppercase tracking-wider text-white/50">{created.name}’s wallet</p>
-              <p className="tabular mt-2 text-5xl font-extrabold">$0.00</p>
-            </div>
-            <Button size="lg" variant="accent" block onClick={() => finish(true)}>
-              Add crypto
-            </Button>
-            <Button size="lg" variant="ghost" block className="mt-2" onClick={() => finish(false)}>
-              Look around first
+            {error && (
+              <p role="alert" className="mb-3 font-semibold text-red-600">
+                {error}
+              </p>
+            )}
+            <Button size="lg" variant="soft" block onClick={send} disabled={busy} data-autofocus>
+              {busy ? 'Sending…' : 'Send it again'}
             </Button>
           </div>
         )}
       </Modal>
-    </div>
+    </Page>
   )
 }
 
-function Creating() {
-  const [i, setI] = useState(0)
-  const lines = ['Creating your wallet', 'Generating your deposit addresses', 'Almost there']
+// /app/verify?token=… — POSTs the token (email scanners only GET), then
+// lands on the wallet. React StrictMode runs effects twice in dev, so guard.
+export function Verify() {
+  const [params] = useSearchParams()
+  const navigate = useNavigate()
+  const { setMe } = useAccount()
+  const [error, setError] = useState('')
+  const started = useRef(false)
+
   useEffect(() => {
-    const t = setInterval(() => setI((x) => Math.min(x + 1, lines.length - 1)), 500)
-    return () => clearInterval(t)
-  }, [lines.length])
+    if (started.current) return
+    started.current = true
+    const token = params.get('token')
+    if (!token) return setError('This sign-in link is missing its code. Request a new one.')
+    api('/auth/verify', { method: 'POST', body: { token } }).then(
+      (me) => {
+        setMe(me)
+        navigate('/app', { replace: true })
+      },
+      (e) => setError(e.message),
+    )
+  }, [params, navigate, setMe])
+
   return (
-    <div className="py-10 text-center" role="status">
-      <div className="mx-auto mb-8 size-20 animate-spin rounded-full border-[6px] border-line border-t-accent" />
-      <p className="text-2xl font-bold">{lines[i]}…</p>
+    <Page>
+      <div className="max-w-lg" role="status">
+        {error ? (
+          <>
+            <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl">That link didn’t work</h1>
+            <p className="mt-5 text-xl leading-relaxed text-muted">{error}</p>
+            <Button as={Link} to="/app" size="lg" className="mt-10" replace>
+              Get a new link
+            </Button>
+          </>
+        ) : (
+          <>
+            <div className="mb-8 size-16 animate-spin rounded-full border-[6px] border-line border-t-accent" />
+            <h1 className="text-4xl font-extrabold tracking-tight sm:text-5xl">Signing you in…</h1>
+          </>
+        )}
+      </div>
+    </Page>
+  )
+}
+
+// First visit after sign-in: ask for a name, then say the wallet is ready.
+export function WelcomeSheet() {
+  const { me, setMe, openDeposit } = useAccount()
+  const [step, setStep] = useState(me.name ? null : 'name')
+  const [name, setName] = useState('')
+  const [error, setError] = useState('')
+
+  if (!step) return null
+  const save = async () => {
+    setError('')
+    try {
+      setMe(await api('/me', { method: 'POST', body: { name } }))
+      setStep('ready')
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+  return (
+    <Modal open step={step} onClose={step === 'ready' ? () => setStep(null) : undefined} label="Welcome">
+      {step === 'name' ? (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            if (name.trim()) save()
+          }}
+        >
+          <SheetTitle title="You’re in! What should we call you?" />
+          <label className="sr-only" htmlFor="ob-name">
+            First name
+          </label>
+          <input
+            id="ob-name"
+            data-autofocus
+            autoComplete="given-name"
+            placeholder="First name"
+            maxLength={40}
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            className={input}
+          />
+          {error && (
+            <p role="alert" className="mt-3 font-semibold text-red-600">
+              {error}
+            </p>
+          )}
+          <Button type="submit" size="lg" block className="mt-6" disabled={!name.trim()}>
+            Continue
+          </Button>
+        </form>
+      ) : (
+        <div className="text-center">
+          <div className="mx-auto mb-6 grid size-20 animate-pop place-items-center rounded-full bg-save text-white">
+            <Check className="size-10" strokeWidth={3} />
+          </div>
+          <SheetTitle title={`Your wallet is ready, ${me.name}`}>
+            Next, add some crypto. We’ll turn it into dollars you can spend at your favorite places.
+          </SheetTitle>
+          <div className="mb-8 rounded-[var(--radius-pass)] bg-ink p-6 text-left text-white">
+            <p className="text-sm font-semibold uppercase tracking-wider text-white/50">{me.name}’s wallet</p>
+            <p className="tabular mt-2 text-5xl font-extrabold">$0.00</p>
+          </div>
+          <Button
+            size="lg"
+            variant="accent"
+            block
+            data-autofocus
+            onClick={() => {
+              setStep(null)
+              openDeposit()
+            }}
+          >
+            Add crypto
+          </Button>
+          <Button size="lg" variant="ghost" block className="mt-2" onClick={() => setStep(null)}>
+            Look around first
+          </Button>
+        </div>
+      )}
+    </Modal>
+  )
+}
+
+function Page({ children }) {
+  return (
+    <div className="flex min-h-dvh flex-col bg-white">
+      <header className="mx-auto flex h-20 w-full max-w-6xl items-center px-6 sm:px-10">
+        <Link to="/" aria-label="Food Token home">
+          <Logo />
+        </Link>
+      </header>
+      <main className="mx-auto grid w-full max-w-6xl flex-1 items-center gap-14 px-6 pb-16 sm:px-10 lg:grid-cols-2">
+        {children}
+        <WalletPreview />
+      </main>
     </div>
   )
 }
@@ -199,7 +280,7 @@ function WalletPreview() {
     { name: 'Chipotle', color: '#441500', bal: '$18.40' },
   ]
   return (
-    <div className="relative mx-auto w-full max-w-md" aria-hidden="true">
+    <div className="relative mx-auto hidden w-full max-w-md lg:block" aria-hidden="true">
       <div className="rounded-[var(--radius-pass)] bg-ink p-7 text-white shadow-[var(--shadow-pass)]">
         <div className="flex items-center justify-between">
           <span className="text-sm font-semibold uppercase tracking-wider text-white/50">Balance</span>

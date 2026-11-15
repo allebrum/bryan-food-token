@@ -6,9 +6,40 @@ import Button from '../components/Button'
 import Modal, { SheetTitle } from '../components/Modal'
 import BrandMark from '../components/BrandMark'
 import { api } from '../lib/api'
+import { useConfig } from '../lib/config'
 import { money, pct, ago } from '../lib/format'
 
+// Client-side gate is for UX only; every /api/admin route checks ADMIN_EMAILS.
 export default function AdminRoot() {
+  const [state, setState] = useState('loading') // loading | signed-out | forbidden | ok
+  useEffect(() => {
+    api('/me').then(
+      (me) => setState(me.isAdmin ? 'ok' : 'forbidden'),
+      (e) => setState(e.status === 401 ? 'signed-out' : 'forbidden'),
+    )
+  }, [])
+  if (state === 'loading') return <div className="min-h-dvh bg-canvas" />
+  if (state !== 'ok') {
+    return (
+      <div className="grid min-h-dvh place-items-center bg-canvas px-6">
+        <div className="max-w-md text-center">
+          <Logo className="justify-center" />
+          <h1 className="mt-10 text-3xl font-extrabold tracking-tight">{state === 'signed-out' ? 'Sign in to continue' : 'Admins only'}</h1>
+          <p className="mt-3 text-lg text-muted">
+            {state === 'signed-out' ? 'Sign in with an admin email, then come back here.' : 'This account isn’t on the admin list.'}
+          </p>
+          <Button as={Link} to="/app" size="lg" className="mt-8">
+            {state === 'signed-out' ? 'Sign in' : 'Back to the app'}
+          </Button>
+        </div>
+      </div>
+    )
+  }
+  return <AdminShell />
+}
+
+function AdminShell() {
+  const config = useConfig()
   const link = ({ isActive }) =>
     `flex shrink-0 items-center gap-3 whitespace-nowrap rounded-xl px-4 h-11 font-semibold transition ${isActive ? 'bg-ink text-white' : 'text-ink-2 hover:bg-white'}`
   return (
@@ -40,7 +71,7 @@ export default function AdminRoot() {
           <Link to="/app" className="flex items-center gap-2 text-sm font-semibold text-muted hover:text-ink">
             <ArrowUpRight className="size-4" /> Customer app
           </Link>
-          <ResetButton />
+          {config?.demoMode && <ResetButton />}
         </div>
       </aside>
       <main className="min-w-0 px-5 py-8 sm:px-10 sm:py-12">
@@ -210,7 +241,7 @@ function Inventory() {
         <table className="w-full min-w-[820px] text-left">
           <thead className="border-b border-line text-sm text-muted">
             <tr>
-              {['Brand', 'Card', 'Face value', 'We paid', 'Sells for', 'Margin', 'Status', ''].map((h) => (
+              {['Brand', 'Card', 'Face value', 'We paid', 'Sells for', 'Margin', 'Expires', 'Status', ''].map((h) => (
                 <th key={h} className="px-5 py-4 font-semibold">
                   {h}
                 </th>
@@ -228,11 +259,12 @@ function Inventory() {
                       {r.brandName}
                     </span>
                   </td>
-                  <td className="px-5 py-3.5 font-mono text-sm text-muted">•••• {r.cardNumber.slice(-4)}</td>
+                  <td className="px-5 py-3.5 font-mono text-sm text-muted">•••• {r.last4}</td>
                   <td className="tabular px-5 py-3.5 font-semibold">{money(r.faceValue)}</td>
                   <td className="tabular px-5 py-3.5">{money(r.cost)}</td>
                   <td className="tabular px-5 py-3.5">{money(sale)}</td>
                   <td className="tabular px-5 py-3.5 font-semibold text-save">+{money(sale - r.cost)}</td>
+                  <td className="px-5 py-3.5 text-sm text-muted">{r.expiresOn ? String(r.expiresOn).slice(0, 10) : '—'}</td>
                   <td className="px-5 py-3.5">
                     {r.status === 'sold' ? (
                       <span className="rounded-full bg-canvas px-3 py-1 text-sm font-semibold" title={r.soldToName}>
@@ -265,7 +297,10 @@ function AddCards({ open, brands, onClose, onAdded }) {
   const [face, setFace] = useState('50')
   const [cost, setCost] = useState('')
   const [cards, setCards] = useState('')
+  const [format, setFormat] = useState('CODE128')
+  const [expiresOn, setExpiresOn] = useState('')
   const [error, setError] = useState('')
+  const demo = useConfig()?.demoMode
   const [done, setDone] = useState(0)
   const brand = brands.find((b) => b.id === brandId)
   const suggested = brand && face ? (Number(face) * (1 - brand.buyDiscount)).toFixed(2) : ''
@@ -287,7 +322,7 @@ function AddCards({ open, brands, onClose, onAdded }) {
     try {
       const res = await api('/admin/inventory', {
         method: 'POST',
-        body: { brandId, faceValue: faceN, cost: costN, cards, generate: lines ? 0 : 1 },
+        body: { brandId, faceValue: faceN, cost: costN, cards, barcodeFormat: format, expiresOn, generate: !lines && demo },
       })
       setDone(res.added)
       setCards('')
@@ -312,7 +347,7 @@ function AddCards({ open, brands, onClose, onAdded }) {
         </div>
       ) : (
         <form onSubmit={submit}>
-          <SheetTitle title="Add gift cards">Enter the batch you bought. Same brand and value per batch.</SheetTitle>
+          <SheetTitle title="Add gift cards">Enter the batch you bought. Same brand, value and barcode type per batch.</SheetTitle>
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="sm:col-span-3">
               <span className="mb-1.5 block text-sm font-bold">Brand</span>
@@ -338,16 +373,37 @@ function AddCards({ open, brands, onClose, onAdded }) {
               <span className="tabular block text-2xl font-extrabold text-save">{brand && faceN ? money(Math.round((sell - costN) * 100)) : '—'}</span>
               {brand && <span className="block text-xs text-save/80">sells at {money(Math.round(sell * 100))}</span>}
             </div>
+            <label className="sm:col-span-2">
+              <span className="mb-1.5 block text-sm font-bold">Barcode at the register</span>
+              <select value={format} onChange={(e) => setFormat(e.target.value)} className={input}>
+                <option value="CODE128">Barcode (Code 128 — most cards)</option>
+                <option value="CODE39">Barcode (Code 39)</option>
+                <option value="EAN13">Barcode (EAN-13)</option>
+                <option value="UPC">Barcode (UPC)</option>
+                <option value="QR">QR code</option>
+                <option value="NONE">No barcode — type the number</option>
+              </select>
+            </label>
+            <label>
+              <span className="mb-1.5 block text-sm font-bold">Expires (optional)</span>
+              <input type="date" value={expiresOn} onChange={(e) => setExpiresOn(e.target.value)} className={input} />
+            </label>
             <label className="sm:col-span-3">
               <span className="mb-1.5 block text-sm font-bold">Card numbers</span>
               <textarea
                 rows={5}
                 value={cards}
                 onChange={(e) => setCards(e.target.value)}
-                placeholder={'One per line:  card number, PIN\n6006491234567890, 4821\n6006491234567891, 1937'}
+                placeholder={'One per line:  card number, PIN, e-gift link\n6006491234567890, 4821\n6006491234567891, 1937, https://…'}
                 className="w-full rounded-2xl border-2 border-line p-4 font-mono text-[15px] outline-none focus:border-ink"
               />
-              <span className="mt-1.5 block text-sm text-muted">{lines ? `${lines} card${lines === 1 ? '' : 's'}` : 'Leave empty to add one demo card with a generated number.'}</span>
+              <span className="mt-1.5 block text-sm text-muted">
+                {lines
+                  ? `${lines} card${lines === 1 ? '' : 's'} · numbers and PINs are encrypted when saved`
+                  : demo
+                    ? 'Leave empty to add one demo card with a generated number.'
+                    : 'PIN and e-gift link are optional. Numbers and PINs are encrypted when saved.'}
+              </span>
             </label>
           </div>
           {error && (
@@ -355,7 +411,7 @@ function AddCards({ open, brands, onClose, onAdded }) {
               {error}
             </p>
           )}
-          <Button type="submit" size="lg" block className="mt-6" disabled={!brandId}>
+          <Button type="submit" size="lg" block className="mt-6" disabled={!brandId || (!lines && !demo)}>
             Add {lines || 1} card{lines > 1 ? 's' : ''}
           </Button>
         </form>

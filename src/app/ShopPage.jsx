@@ -4,9 +4,11 @@ import BrandMark from '../components/BrandMark'
 import { api } from '../lib/api'
 import { pct } from '../lib/format'
 import { useAccount } from './AppRoot'
+import { useConfig } from '../lib/config'
 
 export default function ShopPage() {
   const { openBuy } = useAccount()
+  const demo = useConfig()?.demoMode
   const [q, setQ] = useState('')
   const [category, setCategory] = useState('')
   const [data, setData] = useState({ stores: [], categories: [] })
@@ -74,6 +76,7 @@ export default function ShopPage() {
         </label>
 
         <div className="no-scrollbar -mx-5 mt-4 flex gap-2 overflow-x-auto px-5 sm:mx-0 sm:px-0">
+          {demo && (
           <button
             onClick={locState === 'on' ? undefined : locate}
             className={`flex h-11 shrink-0 items-center gap-2 rounded-full px-4 text-[15px] font-semibold ${
@@ -83,7 +86,8 @@ export default function ShopPage() {
             {locState === 'on' ? <MapPin className="size-4" /> : <Navigation className="size-4" />}
             {locState === 'on' ? 'Near you' : locState === 'asking' ? 'Finding you…' : locState === 'denied' ? 'Denver, CO' : 'Use my location'}
           </button>
-          <span className="my-2 w-px shrink-0 bg-line" />
+          )}
+          {demo && <span className="my-2 w-px shrink-0 bg-line" />}
           {['', ...data.categories].map((c) => (
             <button
               key={c || 'all'}
@@ -125,10 +129,12 @@ export default function ShopPage() {
                   </div>
                   <p className="mt-5 text-xl font-bold">{s.name}</p>
                   <p className="mt-1 text-muted">{s.tagline}</p>
-                  <p className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-ink-2">
-                    <MapPin className="size-4 text-muted" />
-                    {s.nearest} mi · {s.locations.length} nearby
-                  </p>
+                  {s.nearest != null && (
+                    <p className="mt-4 flex items-center gap-1.5 text-sm font-semibold text-ink-2">
+                      <MapPin className="size-4 text-muted" />
+                      {s.nearest} mi · {s.locations.length} nearby
+                    </p>
+                  )}
                 </button>
               </li>
             )

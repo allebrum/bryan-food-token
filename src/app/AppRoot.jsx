@@ -1,11 +1,11 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
-import { Routes, Route, NavLink, Link, Navigate } from 'react-router-dom'
-import { Wallet as WalletIcon, Store, Plus } from 'lucide-react'
+import { Routes, Route, NavLink, Link, Navigate, useLocation } from 'react-router-dom'
+import { Wallet as WalletIcon, Store, Plus, Shield } from 'lucide-react'
 import Logo from '../components/Logo'
 import DemoBanner from '../components/DemoBanner'
-import { api, session } from '../lib/api'
+import { api } from '../lib/api'
 import { initials } from '../lib/format'
-import Onboarding from './Onboarding'
+import Onboarding, { Verify, WelcomeSheet } from './Onboarding'
 import WalletPage from './WalletPage'
 import ShopPage from './ShopPage'
 import DepositFlow from './DepositFlow'
@@ -18,29 +18,30 @@ export const useAccount = () => useContext(Ctx)
 
 export default function AppRoot() {
   const [me, setMe] = useState(null)
-  const [loading, setLoading] = useState(!!session.get())
+  const [loading, setLoading] = useState(true)
   const [flow, setFlow] = useState(null) // { kind: 'deposit' | 'buy' | 'card' | 'account', ... }
+  const { pathname } = useLocation()
 
   const refresh = useCallback(async () => {
-    if (!session.get()) return null
     try {
       const data = await api('/me')
       setMe(data)
       return data
     } catch (e) {
-      if (e.status === 401) {
-        session.clear()
-        setMe(null)
-      }
+      if (e.status === 401) setMe(null)
       return null
     } finally {
       setLoading(false)
     }
   }, [])
 
+  // On the magic-link page, Verify sets the user; a parallel /me (still
+  // signed out) could otherwise land last and sign them back out.
+  const verifying = pathname === '/app/verify'
   useEffect(() => {
-    refresh()
-  }, [refresh])
+    if (verifying) setLoading(false)
+    else refresh()
+  }, [refresh, verifying])
 
   // Keep the balance live while a deposit is confirming.
   useEffect(() => {
@@ -59,8 +60,8 @@ export default function AppRoot() {
       openCard: (cardId) => setFlow({ kind: 'card', cardId }),
       openAccount: () => setFlow({ kind: 'account' }),
       closeFlow: () => setFlow(null),
-      signOut: () => {
-        session.clear()
+      signOut: async () => {
+        await api('/auth/logout', { method: 'POST', body: {} }).catch(() => {})
         setMe(null)
         setFlow(null)
       },
@@ -68,6 +69,14 @@ export default function AppRoot() {
     [me, refresh],
   )
 
+  if (pathname === '/app/verify') {
+    return (
+      <Ctx.Provider value={value}>
+        <DemoBanner />
+        <Verify />
+      </Ctx.Provider>
+    )
+  }
   if (loading) return <div className="min-h-dvh bg-canvas" />
 
   return (
@@ -90,6 +99,7 @@ export default function AppRoot() {
           <BuyFlow store={flow?.kind === 'buy' ? flow.store : null} onClose={value.closeFlow} />
           <CardSheet cardId={flow?.kind === 'card' ? flow.cardId : null} onClose={value.closeFlow} />
           <AccountSheet open={flow?.kind === 'account'} onClose={value.closeFlow} />
+          <WelcomeSheet />
         </>
       )}
     </Ctx.Provider>
@@ -118,6 +128,14 @@ function Shell({ children }) {
             </NavLink>
           </nav>
           <div className="flex items-center gap-2">
+            {me.isAdmin && (
+              <Link
+                to="/admin"
+                className="hidden h-11 items-center gap-1.5 rounded-full px-4 text-[15px] font-semibold text-ink-2 hover:bg-white md:flex"
+              >
+                <Shield className="size-4" /> Admin
+              </Link>
+            )}
             <button
               onClick={openDeposit}
               className="hidden h-11 items-center gap-1.5 rounded-full bg-white px-4 text-[15px] font-semibold shadow-[var(--shadow-soft)] hover:bg-white/70 md:flex"

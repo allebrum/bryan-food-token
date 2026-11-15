@@ -1,7 +1,7 @@
 node_modules
 dist
-server/data/db.json
 .DS_Store
 
 # Local Netlify folder
 .netlify
+.env

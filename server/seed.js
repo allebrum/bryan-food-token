@@ -1,6 +1,5 @@
 // Demo seed data. Brand names are used only to show the concept —
 // no logos, no affiliation implied.
-import { randomUUID } from 'node:crypto'
 
 const BRANDS = [
   { name: 'Starbucks', category: 'Coffee', color: '#00704A', tagline: 'Coffee, tea & breakfast' },
@@ -30,47 +29,35 @@ export function makePin() {
   return digits(4)
 }
 
-export function seed() {
-  const brands = BRANDS.map((b) => ({
-    id: slug(b.name),
-    ...b,
-    buyDiscount: 0.2, // what we pay below face value
-    sellDiscount: 0.15, // what the customer saves
-    active: true,
-    // Store locations are kept as offsets (degrees) from the viewer's centre so the
-    // "near you" demo works wherever it is opened.
-    locations: Array.from({ length: 2 + Math.floor(Math.random() * 3) }, () => ({
-      address: `${100 + Math.floor(Math.random() * 3800)} ${STREETS[Math.floor(Math.random() * STREETS.length)]}`,
-      dLat: rand(-0.09, 0.09),
-      dLng: rand(-0.11, 0.11),
-    })),
-  }))
+// Brand rows for an empty database (all environments).
+export function seedBrands() {
+  const margins = { 'whole-foods-market': [0.12, 0.08], 'chick-fil-a': [0.16, 0.12] }
+  return BRANDS.map((b) => {
+    const id = slug(b.name)
+    const [buy, sell] = margins[id] ?? [0.2, 0.15]
+    return {
+      id,
+      ...b,
+      buyDiscount: buy,
+      sellDiscount: sell,
+      // Demo-only "nearby" offsets (degrees) around the viewer.
+      locations: Array.from({ length: 2 + Math.floor(Math.random() * 3) }, () => ({
+        address: `${100 + Math.floor(Math.random() * 3800)} ${STREETS[Math.floor(Math.random() * STREETS.length)]}`,
+        dLat: rand(-0.09, 0.09),
+        dLng: rand(-0.11, 0.11),
+      })),
+    }
+  })
+}
 
-  // Slightly different margins on a couple of brands so the admin view is interesting.
-  brands.find((b) => b.id === 'whole-foods-market').buyDiscount = 0.12
-  brands.find((b) => b.id === 'whole-foods-market').sellDiscount = 0.08
-  brands.find((b) => b.id === 'chick-fil-a').buyDiscount = 0.16
-  brands.find((b) => b.id === 'chick-fil-a').sellDiscount = 0.12
-
-  const inventory = []
-  const now = Date.now()
+// Fake inventory for DEMO_MODE: [{ brandId, face, number, pin }]
+export function demoInventory(brands) {
+  const out = []
   for (const b of brands) {
     for (const face of [10, 25, 50, 100]) {
       const count = face === 100 ? 2 : 3 + Math.floor(Math.random() * 3)
-      for (let i = 0; i < count; i++) {
-        inventory.push({
-          id: randomUUID(),
-          brandId: b.id,
-          faceValue: face * 100,
-          cost: Math.round(face * 100 * (1 - b.buyDiscount)),
-          cardNumber: makeCardNumber(),
-          pin: makePin(),
-          status: 'available',
-          addedAt: new Date(now - Math.floor(rand(1, 20)) * 86400000).toISOString(),
-        })
-      }
+      for (let i = 0; i < count; i++) out.push({ brand: b, face: face * 100, number: makeCardNumber(), pin: makePin() })
     }
   }
-
-  return { brands, inventory, users: [], deposits: [], sales: [] }
+  return out
 }
