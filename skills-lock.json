@@ -1,0 +1,23 @@
+{
+  "version": 2,
+  "skills": {
+    "alchemy-api": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "skillPath": "skills/alchemy-api/SKILL.md",
+      "computedHash": "e24f88151b87da8e1c0e991af31f7d8fb8f73cd429913d270e2645738a79c08e"
+    },
+    "alchemy-cli": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "skillPath": "skills/alchemy-cli/SKILL.md",
+      "computedHash": "4a841608175b0ef96cae5ff452001fc8be98ac0f742582a13fa193424886c977"
+    },
+    "alchemy-mcp": {
+      "source": "alchemyplatform/skills",
+      "sourceType": "github",
+      "skillPath": "skills/alchemy-mcp/SKILL.md",
+      "computedHash": "c5f58858635a3132b8c3ac70e0967e90dbebf6e089a907666ee5bee0ecf74cc0"
+    }
+  }
+}
