@@ -12,6 +12,7 @@ export default function CardSheet({ cardId, onClose }) {
   const { me, setMe } = useAccount()
   const [view, setView] = useState('pass')
   const [showPin, setShowPin] = useState(false)
+  const [mode, setMode] = useState(null) // 'barcode' | 'qr'; null = the card's own format
   const [toast, setToast] = useState('')
   const [secret, setSecret] = useState(null) // { number, pin, egiftUrl, barcodeFormat }
   const [secretError, setSecretError] = useState('')
@@ -21,6 +22,7 @@ export default function CardSheet({ cardId, onClose }) {
     setShowPin(false)
     setToast('')
     setSecret(null)
+    setMode(null)
     setSecretError('')
     if (!cardId) return
     let live = true
@@ -89,7 +91,7 @@ export default function CardSheet({ cardId, onClose }) {
             <div className="mx-4 mb-4 rounded-2xl bg-white p-4 text-ink">
               <div className="flex min-h-[150px] items-center justify-center">
                 {secret ? (
-                  <CardCode secret={secret} />
+                  <CardCode secret={secret} mode={mode} />
                 ) : secretError ? (
                   <p className="text-center font-semibold text-red-600">{secretError}</p>
                 ) : (
@@ -103,23 +105,41 @@ export default function CardSheet({ cardId, onClose }) {
           </div>
 
           <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-            {secret?.egiftUrl ? (
-              <a
-                href={secret.egiftUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex h-10 items-center gap-2 rounded-full bg-canvas px-4 text-sm font-semibold hover:bg-line"
-              >
-                <ExternalLink className="size-4" /> Open e-gift card
-              </a>
-            ) : (
-              <span />
-            )}
+            {/* Apple Wallet–style switch: same card number, either code. */}
+            <div className="inline-flex rounded-full bg-canvas p-1" role="group" aria-label="Show card as">
+              {[
+                ['barcode', 'Barcode'],
+                ['qr', 'QR code'],
+              ].map(([k, l]) => {
+                const active = (mode ?? defaultMode(secret)) === k
+                return (
+                  <button
+                    key={k}
+                    onClick={() => setMode(k)}
+                    aria-pressed={active}
+                    disabled={!secret}
+                    className={`h-9 rounded-full px-4 text-sm font-semibold transition ${active ? 'bg-white shadow-sm' : 'text-muted hover:text-ink'}`}
+                  >
+                    {l}
+                  </button>
+                )
+              })}
+            </div>
             {card.hasPin && card.expiresOn && <span className="text-sm text-muted">Expires {fmtDate(card.expiresOn)}</span>}
             <span className="flex items-center gap-1.5 text-sm text-muted">
               <Sun className="size-4" /> Turn brightness up
             </span>
           </div>
+          {secret?.egiftUrl && (
+            <a
+              href={secret.egiftUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 inline-flex h-10 items-center gap-2 rounded-full bg-canvas px-4 text-sm font-semibold hover:bg-line"
+            >
+              <ExternalLink className="size-4" /> Open e-gift card
+            </a>
+          )}
 
           {toast && (
             <p role="status" className="mt-5 flex items-center justify-center gap-2 rounded-2xl bg-save-soft py-3 font-semibold text-save">
@@ -167,10 +187,15 @@ const fmtDate = (d) => new Date(String(d).slice(0, 10) + 'T12:00:00').toLocaleDa
 
 // Render the code the card actually uses at the register. Invalid EAN/UPC
 // data falls back to Code 128 rather than crashing the sheet.
-function CardCode({ secret }) {
+// What the card opens on: QR if it was added as QR, otherwise its barcode.
+const defaultMode = (secret) => (secret?.barcodeFormat === 'QR' ? 'qr' : secret?.barcodeFormat === 'NONE' ? null : 'barcode')
+
+function CardCode({ secret, mode }) {
   const { number, barcodeFormat: f } = secret
-  if (f === 'NONE') return <p className="text-center text-muted">Give the cashier the card number below.</p>
-  if (f === 'QR') return <QRCodeSVG value={number} size={150} level="M" marginSize={0} />
+  const show = mode ?? defaultMode(secret)
+  if (!show) return <p className="text-center text-muted">Give the cashier the card number below.</p>
+  if (show === 'qr') return <QRCodeSVG value={number} size={150} level="M" marginSize={0} />
+  if (f === 'QR' || f === 'NONE') return <Barcode value={number} format="CODE128" height={92} width={number.length > 18 ? 1.5 : 2} margin={0} displayValue={false} background="#ffffff" />
   const valid = { EAN13: /^\d{12,13}$/, UPC: /^\d{11,12}$/, CODE39: /^[0-9A-Z \-.$/+%]+$/ }[f]
   const format = valid && !valid.test(number) ? 'CODE128' : f
   return <Barcode value={number} format={format} height={92} width={number.length > 18 ? 1.5 : 2} margin={0} displayValue={false} background="#ffffff" />
