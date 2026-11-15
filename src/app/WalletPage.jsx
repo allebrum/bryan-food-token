@@ -25,7 +25,8 @@ export default function WalletPage() {
     <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_400px] lg:gap-14">
       <div className="min-w-0">
         <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">
-          {greeting()}, {me.name}
+          {greeting()}
+          {me.name ? `, ${me.name}` : ''}
         </h1>
 
         {/* Balance pass */}

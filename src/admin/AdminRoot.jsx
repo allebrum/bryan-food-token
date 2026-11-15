@@ -570,7 +570,7 @@ function Customers() {
               {rows.map((u) => (
                 <tr key={u.id}>
                   <td className="px-5 py-3.5">
-                    <span className="block font-semibold">{u.name}</span>
+                    <span className="block font-semibold">{u.name || 'No name yet'}</span>
                     <span className="block text-sm text-muted">{u.email}</span>
                   </td>
                   <td className="px-5 py-3.5 text-muted">{ago(u.createdAt)}</td>

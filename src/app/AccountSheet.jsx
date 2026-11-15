@@ -11,9 +11,9 @@ export default function AccountSheet({ open, onClose }) {
   return (
     <Modal open={open} onClose={onClose} label="Your account">
       <div className="flex items-center gap-4">
-        <span className="grid size-16 place-items-center rounded-full bg-accent text-xl font-bold text-white">{initials(me.name)}</span>
+        <span className="grid size-16 place-items-center rounded-full bg-accent text-xl font-bold text-white">{initials(me.name) || '•'}</span>
         <div>
-          <p className="text-2xl font-extrabold">{me.name}</p>
+          <p className="text-2xl font-extrabold">{me.name || 'Your account'}</p>
           <p className="text-muted">{me.email}</p>
         </div>
       </div>

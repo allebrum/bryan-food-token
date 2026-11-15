@@ -19,8 +19,9 @@ export function ago(iso) {
 }
 
 export const groupCard = (n = '') => n.replace(/(.{4})/g, '$1 ').trim()
-export const initials = (name = '') =>
-  name.replace(/[^A-Za-z ]/g, '').split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase()
+// Accepts null/undefined: new accounts have no name until they set one.
+export const initials = (name) =>
+  String(name ?? '').replace(/[^A-Za-z ]/g, '').split(' ').filter(Boolean).slice(0, 2).map((w) => w[0]).join('').toUpperCase()
 
 // Pick readable text on a brand colour.
 export function onColor(hex) {
